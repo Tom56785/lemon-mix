@@ -48,7 +48,8 @@ fn shade(x: f32, y: f32) -> Option<[f32; 4]> {
     // The lemon: an ellipse tilted by 30 degrees, with pointed ends.
     let (ex, ey) = rotate(x - 0.48, y - 0.55, -0.52);
     let tip = |t: f32| (t.abs() - 0.36).max(0.0) * 1.6;
-    let radius = (ex / 0.40).powi(2) + (ey / (0.30 - tip(ex))).max(0.0).powi(2).min(1e9);
+    let half = (0.30 - tip(ex)).max(1e-6); // half the height, narrowing to the tips
+    let radius = (ex / 0.40).powi(2) + (ey / half).powi(2).min(1e9);
     if radius > 1.0 && !(ex.abs() <= 0.46 && ey.abs() <= 0.035 && ex.abs() > 0.38) {
         return None;
     }
