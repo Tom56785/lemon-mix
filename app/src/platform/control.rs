@@ -101,6 +101,7 @@ pub fn snapshot() -> Snapshot {
         buses,
         capture_devices,
         render_devices,
+        apps: host.apps(),
         latency_ms: host.latency_ms(),
     }
 }

@@ -108,6 +108,12 @@ The window uses `{"op": "mixer", "command": {...}}` for everything it changes. I
 
 The strip then hears the bus as it left the bus, 1 ms later, with no virtual device in between. Lemon Mix refuses a change that would let a bus hear itself, and turns off the strip's send to the bus it takes.
 
+A strip can also capture an application, named by its program's file name; the snapshot's `apps` lists the applications with sound:
+
+```json
+{ "op": "mixer", "command": { "cmd": "device", "id": "H3", "endpoint": "app:Spotify.exe", "exclusive": false } }
+```
+
 ## The snapshot
 
 The fields a controller usually needs (the full set is `Snapshot` in `app/src/protocol.rs`):
@@ -131,7 +137,8 @@ The fields a controller usually needs (the full set is `Snapshot` in `app/src/pr
 ```
 
 - `routes` lists the IDs of the buses a strip sends to.
-- `port` is present only for hardware strips and buses. `state` is `off`, `opening`, `running` or `failed`, or `bus` for a strip fed from a bus; in that case `device_name` names the bus.
+- `port` is present only for hardware strips and buses. `state` is `off`, `opening`, `running` or `failed`, or `bus` for a strip fed from a bus; in that case `device_name` names the bus. A strip capturing an application is `running` while it captures, with the application's name in `device_name`, and `failed` while it waits for the application to start.
+- `apps` lists the applications with sound: `{ "exe": "Spotify.exe", "name": "Spotify", "active": true }`, where `active` means playing now.
 
 ## From the command line
 

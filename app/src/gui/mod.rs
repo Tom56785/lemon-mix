@@ -27,7 +27,7 @@ use self::shell::{call_service_within, run_job};
 use crate::mixer::MixerHost;
 use crate::platform::control;
 use crate::platform::service::ServiceState;
-use crate::protocol::{BusView, CableView, DeviceView, MixerCommand, Request, StripView, Tone};
+use crate::protocol::{AppView, BusView, CableView, DeviceView, MixerCommand, Request, StripView, Tone};
 
 const OK_COLOR: Color32 = Color32::from_rgb(64, 180, 80);
 const PENDING_COLOR: Color32 = Color32::from_rgb(230, 160, 30);
@@ -147,6 +147,7 @@ struct App {
     cables: Vec<CableView>,
     capture_devices: Vec<DeviceView>,
     render_devices: Vec<DeviceView>,
+    apps: Vec<AppView>,
     /// When the user last changed each strip or bus, by ID.
     edited: HashMap<String, Instant>,
     /// Meter levels as shown, with their fall-back.
@@ -182,6 +183,7 @@ impl App {
             cables: Vec::new(),
             capture_devices: Vec::new(),
             render_devices: Vec::new(),
+            apps: Vec::new(),
             edited: HashMap::new(),
             meter_display: HashMap::new(),
             last_frame: Instant::now(),
@@ -261,6 +263,7 @@ impl App {
         self.cables = snapshot.cables.clone();
         self.capture_devices = snapshot.capture_devices.clone();
         self.render_devices = snapshot.render_devices.clone();
+        self.apps = snapshot.apps.clone();
         // Meters: a level rises at once and falls at about 24 dB a second.
         let elapsed = (now - self.last_frame).as_secs_f32().min(0.2);
         let fall = 10f32.powf(-24.0 * elapsed / 20.0);
@@ -611,9 +614,15 @@ impl App {
                         (format!("{}{}", crate::mixer::BUS_SOURCE, bus.key), name)
                     })
                     .collect();
-                if let Some((endpoint, exclusive)) =
-                    widgets::device_picker(ui, &strip.id, port, &self.capture_devices, "Recording devices", &buses)
-                {
+                if let Some((endpoint, exclusive)) = widgets::device_picker(
+                    ui,
+                    &strip.id,
+                    port,
+                    &self.capture_devices,
+                    "Recording devices",
+                    &buses,
+                    &self.apps,
+                ) {
                     if let Some(p) = &mut self.strips[index].port {
                         (p.endpoint, p.exclusive) = (endpoint.clone(), exclusive);
                     }
@@ -698,7 +707,7 @@ impl App {
             }
             if let Some(port) = &bus.port {
                 if let Some((endpoint, exclusive)) =
-                    widgets::device_picker(ui, &bus.id, port, &self.render_devices, "Playback devices", &[])
+                    widgets::device_picker(ui, &bus.id, port, &self.render_devices, "Playback devices", &[], &[])
                 {
                     if let Some(p) = &mut self.buses[index].port {
                         (p.endpoint, p.exclusive) = (endpoint.clone(), exclusive);
@@ -1031,6 +1040,7 @@ mod tests {
                 cables: Vec::new(),
                 capture_devices: Vec::new(),
                 render_devices: Vec::new(),
+                apps: Vec::new(),
                 edited: HashMap::new(),
                 meter_display: HashMap::new(),
                 last_frame: Instant::now(),

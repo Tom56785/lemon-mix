@@ -10,6 +10,7 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 - **Output buses**: any number of hardware buses, A1, A2, ... (physical playback devices), added and removed in the window, and one virtual bus, B1, B2, ..., per virtual output or loopback device.
 - **Routing matrix**: any strip to any combination of buses, with a button per bus on every strip.
 - **Bus returns**: a hardware strip can take a bus's output instead of a device, to process or re-route a mix without a virtual device in between. Lemon Mix refuses routes that would let a bus hear itself.
+- **Application capture**: an input strip can record what one application plays, such as Spotify or a browser, without changing its output device in Windows. The strip follows the application as it closes and starts again.
 - **Remote control**: a [Stream Deck plugin](streamdeck/README.md) whose keys and dials show the mixer's state, a command line (`LemonMix.exe --control mute Mic`), and a [documented pipe protocol](docs/control-protocol.md) for your own tools.
 - **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise gate and compressor, peak meters with gain-reduction display.
 - **Per bus**: fader, mute, mono, peak limiter, meters.
@@ -56,6 +57,8 @@ Typical setups:
 - *Microphone with processing for calls*: pick the microphone on a hardware strip, turn up its gate and compressor, and route it to the B bus of a "Mic" output device; select "Mic" as the microphone in the call app.
 
 Double-click a hardware strip's or bus's name to rename it, or a fader or knob to reset it. Click the value under a fader, beside the balance or beside a knob to type an exact value (`-6`, `-inf`, `L40`), then press Enter.
+
+To capture an application, open a hardware strip's device menu and pick it under **Applications**, which lists the applications with sound (those playing now are marked). The strip records that program's sound, and that of the processes it starts (a browser's audio process, say), while the application still plays on its own device too. To hear an application only through Lemon Mix, set its output to a Lemon Mix virtual input in Windows' *App volume and device preferences* instead. While the application is closed the strip shows *Waiting for* it, and it picks the application up again when it starts. This needs Windows 10 version 2004 or later; DRM-protected playback may record as silence, and the Windows service, which runs outside your sign-in, may not be able to capture your applications.
 
 To feed a bus back into the mixer, open a hardware strip's device menu and choose **From A2** (or any bus) under **Mixer outputs**. The strip hears the bus 1 ms after it leaves the bus, after the bus's fader and limiter. A strip never sends to the bus it takes, and a route that would close a loop through other bus-fed strips is refused.
 

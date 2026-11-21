@@ -16,7 +16,8 @@ mod manager;
 mod wasapi;
 
 pub use manager::{
-    DEFAULT_ENDPOINT, DeviceChoice, DeviceInfo, DeviceManager, Direction, PortHandle, PortStatus, list_devices,
+    APP_ENDPOINT, AppInfo, DEFAULT_ENDPOINT, DeviceChoice, DeviceInfo, DeviceManager, Direction, PortHandle,
+    PortStatus, app_display_name, list_apps, list_devices,
 };
 pub use port::{CapturePort, PortReading, PortState, RenderPort};
 #[cfg(windows)]

@@ -9,18 +9,27 @@ use std::time::{Duration, Instant};
 use cables::logf;
 use cables::logging::Logger;
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, S_OK, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::*;
 use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE};
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
 use windows::Win32::System::Com::{
-    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, STGM_READ,
+    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IAgileObject,
+    IAgileObject_Impl, STGM_READ,
 };
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, WaitForSingleObject,
+};
 use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
-use windows::core::{HSTRING, PCWSTR, implement};
+use windows::core::{HSTRING, Interface, PCWSTR, PWSTR, implement};
 
-use crate::manager::{DeviceChange, DeviceChoice, DeviceInfo, Direction, PortShared, PortStatus};
+use crate::manager::{
+    AppInfo, DeviceChange, DeviceChoice, DeviceInfo, Direction, PortShared, PortStatus, app_display_name,
+};
 use crate::port::PortState;
 use crate::ring::Stereo;
 
@@ -397,7 +406,7 @@ pub(crate) fn run_stream(port: &PortShared, choice: &DeviceChoice, generation: u
         PortStatus { device_name: name.clone(), error: String::new(), exclusive: stream.exclusive };
     let result = match port.direction {
         Direction::Render => render(port, &stream, generation),
-        Direction::Capture => capture(port, &stream, generation),
+        Direction::Capture => capture(port, &stream, generation, None),
     };
     // SAFETY: stops the client this function started.
     unsafe {
@@ -458,7 +467,11 @@ fn render(port: &PortShared, stream: &Stream, generation: u64) -> Result<(), Str
     }
 }
 
-fn capture(port: &PortShared, stream: &Stream, generation: u64) -> Result<(), String> {
+/// Streams a capture until the port stops or its generation changes (`Ok`), or
+/// the device fails (`Err`). An application's stream (`app`) delivers nothing
+/// while the application is quiet: the port is then fed silence at the
+/// stream's rate, and the stream ends when the application closes.
+fn capture(port: &PortShared, stream: &Stream, generation: u64, app: Option<&AppWatch>) -> Result<(), String> {
     let capture_port = port.capture.as_ref().ok_or("not a capture port")?;
     let format = stream.format;
     // SAFETY: as for render; captured buffers are read within their length.
@@ -469,14 +482,40 @@ fn capture(port: &PortShared, stream: &Stream, generation: u64) -> Result<(), St
         port.stats().set_state(PortState::Running);
         let mut samples = vec![[0f32; 2]; stream.buffer_frames.max(4096)];
         let mut last_event = Instant::now();
+        let mut last_push = Instant::now();
+        let mut last_check = Instant::now();
         loop {
-            let signalled = WaitForSingleObject(stream.event.0, 100) == WAIT_OBJECT_0;
+            let wait = if app.is_some() { 10 } else { 100 };
+            let signalled = WaitForSingleObject(stream.event.0, wait) == WAIT_OBJECT_0;
             if port.should_stop(generation) {
                 return Ok(());
             }
+            if let Some(app) = app
+                && last_check.elapsed() >= APP_CHECK_INTERVAL
+            {
+                last_check = Instant::now();
+                app.check()?;
+            }
             if !signalled {
-                if last_event.elapsed() > STALL_LIMIT {
-                    return Err("the device stopped delivering audio".into());
+                match app {
+                    None if last_event.elapsed() > STALL_LIMIT => {
+                        return Err("the device stopped delivering audio".into());
+                    }
+                    None => {}
+                    Some(_) if last_push.elapsed() >= APP_QUIET => {
+                        // Keeps the port's clock running while the application
+                        // is quiet, as a device would.
+                        let quiet = last_push.elapsed().min(Duration::from_secs(1));
+                        let mut frames = (quiet.as_secs_f64() * format.rate as f64) as usize;
+                        last_push = Instant::now();
+                        while frames > 0 {
+                            let n = frames.min(samples.len());
+                            samples[..n].fill([0.0; 2]);
+                            capture_port.push(&samples[..n]);
+                            frames -= n;
+                        }
+                    }
+                    Some(_) => {}
                 }
                 continue;
             }
@@ -502,10 +541,248 @@ fn capture(port: &PortShared, stream: &Stream, generation: u64) -> Result<(), St
                     capture_port.push(&samples[..n]);
                     done += n;
                 }
+                last_push = Instant::now();
                 client.ReleaseBuffer(frames as u32).map_err(|e| describe(&e))?;
             }
         }
     }
+}
+
+// ---- Applications --------------------------------------------------------
+
+/// How long an application may send nothing before its port is fed silence.
+const APP_QUIET: Duration = Duration::from_millis(50);
+/// How often a capture checks that its application still runs.
+const APP_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The application a capture follows: ends the stream when it closes.
+struct AppWatch {
+    process: HANDLE,
+    name: String,
+}
+
+impl AppWatch {
+    fn open(pid: u32, name: &str) -> Result<AppWatch, String> {
+        // SAFETY: opens a handle that is closed on drop.
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }
+            .map_err(|_| format!("{name} could not be opened"))?;
+        Ok(AppWatch { process, name: name.to_string() })
+    }
+
+    fn check(&self) -> Result<(), String> {
+        // SAFETY: waits on a handle this watch owns, without blocking.
+        if unsafe { WaitForSingleObject(self.process, 0) } == WAIT_OBJECT_0 {
+            return Err(format!("{} closed", self.name));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AppWatch {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from OpenProcess and is closed once.
+        unsafe {
+            let _ = CloseHandle(self.process);
+        }
+    }
+}
+
+/// The file name of a process's program, if it can be read.
+fn process_exe(pid: u32) -> Option<String> {
+    // SAFETY: the handle is closed before returning; the buffer outlives the call.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buffer = [0u16; 1024];
+        let mut length = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut length);
+        let _ = CloseHandle(process);
+        result.ok()?;
+        let path = String::from_utf16_lossy(&buffer[..length as usize]);
+        path.rsplit(['\\', '/']).next().map(str::to_string)
+    }
+}
+
+/// The process to capture for a program: one running it whose parent does
+/// not, so its child processes (a browser's audio process, say) come along.
+fn find_root_process(exe: &str) -> Option<u32> {
+    // SAFETY: walks a snapshot of the processes, closed before returning.
+    let processes: Vec<(u32, u32, String)> = unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut list = Vec::new();
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            let length = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
+            list.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+        list
+    };
+    let runs = |pid: u32| processes.iter().any(|(p, _, name)| *p == pid && name.eq_ignore_ascii_case(exe));
+    let matching: Vec<&(u32, u32, String)> =
+        processes.iter().filter(|(_, _, name)| name.eq_ignore_ascii_case(exe)).collect();
+    matching.iter().find(|(_, parent, _)| !runs(*parent)).or(matching.first()).map(|(pid, _, _)| *pid)
+}
+
+/// The applications that have audio sessions on any playback device, by
+/// program, without this process and the system sounds.
+pub(crate) fn list_apps() -> Result<Vec<AppInfo>, String> {
+    let _com = com();
+    let enumerator = enumerator()?;
+    let mut apps: Vec<AppInfo> = Vec::new();
+    // SAFETY: COM calls on interfaces this function holds.
+    unsafe {
+        let devices = enumerator
+            .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+            .map_err(|e| format!("devices: {}", describe(&e)))?;
+        for i in 0..devices.GetCount().unwrap_or(0) {
+            let Ok(device) = devices.Item(i) else { continue };
+            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { continue };
+            let Ok(sessions) = manager.GetSessionEnumerator() else { continue };
+            for s in 0..sessions.GetCount().unwrap_or(0) {
+                let Ok(session) = sessions.GetSession(s) else { continue };
+                let Ok(session) = session.cast::<IAudioSessionControl2>() else { continue };
+                if session.IsSystemSoundsSession() == S_OK {
+                    continue;
+                }
+                let pid = session.GetProcessId().unwrap_or(0);
+                if pid == 0 || pid == std::process::id() {
+                    continue;
+                }
+                let Some(exe) = process_exe(pid) else { continue };
+                let active = session.GetState().is_ok_and(|state| state == AudioSessionStateActive);
+                match apps.iter_mut().find(|a| a.exe.eq_ignore_ascii_case(&exe)) {
+                    Some(app) => app.active |= active,
+                    None => apps.push(AppInfo { name: app_display_name(&exe), exe, active }),
+                }
+            }
+        }
+    }
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    Ok(apps)
+}
+
+/// Signals when an asynchronous activation completes. Agile, as
+/// ActivateAudioInterfaceAsync requires.
+#[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
+struct Activation {
+    done: std::sync::Mutex<Option<Sender<()>>>,
+}
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for Activation_Impl {
+    fn ActivateCompleted(&self, _: Option<&IActivateAudioInterfaceAsyncOperation>) -> windows::core::Result<()> {
+        if let Some(done) = self.done.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = done.send(());
+        }
+        Ok(())
+    }
+}
+
+impl IAgileObject_Impl for Activation_Impl {}
+
+/// A PROPVARIANT holding a blob, laid out as Windows expects, that owns
+/// nothing: the blob stays the caller's.
+#[repr(C)]
+struct BlobVariant {
+    vt: u16,
+    reserved: [u16; 3],
+    size: u32,
+    data: *const u8,
+}
+
+const VT_BLOB: u16 = 65;
+
+/// An audio client recording process `pid` and the processes it started.
+fn open_app_stream(pid: u32) -> Result<Stream, String> {
+    let params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: pid,
+                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            },
+        },
+    };
+    let variant = BlobVariant {
+        vt: VT_BLOB,
+        reserved: [0; 3],
+        size: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+        data: &params as *const AUDIOCLIENT_ACTIVATION_PARAMS as *const u8,
+    };
+    let (done, finished) = channel();
+    let handler: IActivateAudioInterfaceCompletionHandler =
+        Activation { done: std::sync::Mutex::new(Some(done)) }.into();
+    // SAFETY: the parameters and the variant outlive the activation, which
+    // completes (or times out) before they go; COM calls on interfaces this
+    // function holds; the format points to a live local.
+    unsafe {
+        let operation = ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &IAudioClient::IID,
+            Some(&variant as *const BlobVariant as *const windows::core::PROPVARIANT),
+            &handler,
+        )
+        .map_err(|e| format!("application capture is unavailable: {}", describe(&e)))?;
+        finished.recv_timeout(Duration::from_secs(5)).map_err(|_| "Windows did not open the capture in time")?;
+        let mut result = windows::core::HRESULT(0);
+        let mut activated = None;
+        operation.GetActivateResult(&mut result, &mut activated).map_err(|e| describe(&e))?;
+        result.ok().map_err(|e| format!("application capture: {}", describe(&e)))?;
+        let client: IAudioClient = activated.ok_or("no audio client")?.cast().map_err(|e| describe(&e))?;
+        let format = Format { sample: Sample::F32, channels: 2, rate: 48_000, block: 8 };
+        let wave = WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
+            nChannels: 2,
+            nSamplesPerSec: format.rate,
+            nAvgBytesPerSec: format.rate * format.block as u32,
+            nBlockAlign: format.block as u16,
+            wBitsPerSample: 32,
+            cbSize: 0,
+        };
+        client
+            .Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                SHARED_BUFFER_HNS,
+                0,
+                &wave,
+                None,
+            )
+            .map_err(|e| format!("application capture: {}", describe(&e)))?;
+        let event = EventHandle(CreateEventW(None, false, false, None).map_err(|e| e.to_string())?);
+        client.SetEventHandle(event.0).map_err(|e| describe(&e))?;
+        // Process loopback clients may not report their buffer size.
+        let buffer_frames = client.GetBufferSize().map_or(4800, |frames| frames as usize);
+        Ok(Stream { client, format, buffer_frames, event, exclusive: false })
+    }
+}
+
+/// Captures an application's sound into the port until the port stops, its
+/// generation changes (`Ok`), or the application closes or cannot be
+/// captured (`Err`; the port tries again shortly, so it follows the
+/// application when it starts again).
+pub(crate) fn run_app_stream(port: &PortShared, exe: &str, generation: u64) -> Result<(), String> {
+    let _com = com();
+    let name = app_display_name(exe);
+    let pid = find_root_process(exe).ok_or_else(|| format!("waiting for {name} to start"))?;
+    let watch = AppWatch::open(pid, &name)?;
+    let stream = open_app_stream(pid).map_err(|err| format!("{name}: {err}"))?;
+    let _audio_thread = cables::enter_audio_thread(&port.logger);
+    logf!(port.logger, "DEVICE {} capturing {name} (process {pid}, {})", port.label(), stream.format.describe());
+    *port.status.lock().unwrap_or_else(|p| p.into_inner()) =
+        PortStatus { device_name: name.clone(), error: String::new(), exclusive: false };
+    let result = capture(port, &stream, generation, Some(&watch));
+    // SAFETY: stops the client this function started.
+    unsafe {
+        let _ = stream.client.Stop();
+    }
+    match &result {
+        Ok(()) => logf!(port.logger, "DEVICE {} stopped capturing {name}", port.label()),
+        Err(err) => logf!(port.logger, "DEVICE {} stopped capturing {name}: {err}", port.label()),
+    }
+    result
 }
 
 #[implement(IMMNotificationClient)]
@@ -728,6 +1005,55 @@ mod tests {
             if let Ok(devices) = enumerate(direction) {
                 assert!(devices.iter().filter(|d| d.is_default).count() <= 1);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+
+    #[test]
+    fn display_names_drop_the_extension() {
+        assert_eq!(app_display_name("Spotify.exe"), "Spotify");
+        assert_eq!(app_display_name("chrome.EXE"), "chrome");
+        assert_eq!(app_display_name("odd.name.exe"), "odd.name");
+        assert_eq!(app_display_name("noext"), "noext");
+    }
+
+    /// Needs a Windows audio session: lists the applications playing sound,
+    /// and records a second of the first one that is.
+    #[test]
+    #[ignore = "needs an application playing sound"]
+    fn capture_an_application() {
+        let apps = list_apps().unwrap();
+        eprintln!("{apps:#?}");
+        let app = apps.iter().find(|a| a.active).expect("an application playing sound");
+        let pid = find_root_process(&app.exe).expect("its process");
+        let _com = com();
+        let stream = open_app_stream(pid).unwrap();
+        // SAFETY: COM calls on the client the stream owns.
+        unsafe {
+            let client: IAudioCaptureClient = stream.client.GetService().unwrap();
+            stream.client.Start().unwrap();
+            let (mut frames, mut loudest) = (0usize, 0f32);
+            let until = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < until {
+                WaitForSingleObject(stream.event.0, 50);
+                while client.GetNextPacketSize().unwrap() > 0 {
+                    let (mut data, mut n, mut flags) = (std::ptr::null_mut(), 0u32, 0u32);
+                    client.GetBuffer(&mut data, &mut n, &mut flags, None, None).unwrap();
+                    let bytes = std::slice::from_raw_parts(data, n as usize * stream.format.block);
+                    let mut samples = vec![[0f32; 2]; n as usize];
+                    read_samples(&stream.format, bytes, &mut samples);
+                    loudest = samples.iter().flatten().fold(loudest, |m, s| m.max(s.abs()));
+                    frames += n as usize;
+                    client.ReleaseBuffer(n).unwrap();
+                }
+            }
+            let _ = stream.client.Stop();
+            eprintln!("{}: {frames} frames in a second, peak {loudest:.3}", app.name);
+            assert!(frames > 40_000, "about 48,000 frames a second");
         }
     }
 }

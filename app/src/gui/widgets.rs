@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 use super::{ERROR_COLOR, OK_COLOR, PENDING_COLOR, tone_color};
-use crate::protocol::{DeviceView, PortView, Tone};
+use crate::protocol::{AppView, DeviceView, PortView, Tone};
 
 pub const STRIP_WIDTH: f32 = 128.0;
 /// The height of a device picker, kept free on strips without one so the
@@ -58,7 +58,7 @@ pub fn ellipsize(text: &str, max: usize) -> String {
 /// The device picker of a hardware strip or bus, with its exclusive-mode
 /// switch. Returns the new choice when the user changes it.
 /// A strip may also take the output of one of `buses`, each a choice (`bus:<key>`)
-/// and its name.
+/// and its name, or capture one of `apps` (`app:<exe>`).
 pub fn device_picker(
     ui: &mut egui::Ui,
     id: &str,
@@ -66,6 +66,7 @@ pub fn device_picker(
     devices: &[DeviceView],
     heading: &str,
     buses: &[(String, String)],
+    apps: &[AppView],
 ) -> Option<(String, bool)> {
     let mut endpoint = port.endpoint.clone();
     let mut exclusive = port.exclusive;
@@ -78,6 +79,7 @@ pub fn device_picker(
                 .find(|d| d.id == id)
                 .map(|d| d.name.clone())
                 .or_else(|| buses.iter().find(|(choice, _)| choice == id).map(|(_, name)| format!("From {name}")))
+                .or_else(|| id.strip_prefix(devices::APP_ENDPOINT).map(devices::app_display_name))
                 .unwrap_or_else(|| "(not connected)".into()),
         }
     };
@@ -107,14 +109,30 @@ pub fn device_picker(
                     ui.selectable_value(&mut endpoint, choice.clone(), format!("From {name}"));
                 }
             }
+            if !apps.is_empty() || endpoint.starts_with(devices::APP_ENDPOINT) {
+                ui.separator();
+                ui.label(RichText::new("Applications").small().color(Color32::GRAY));
+                for app in apps {
+                    let text = if app.active { format!("{} \u{00b7} playing", app.name) } else { app.name.clone() };
+                    ui.selectable_value(&mut endpoint, format!("{}{}", devices::APP_ENDPOINT, app.exe), text);
+                }
+                // The chosen application, while it is not running.
+                if let Some(exe) = port.endpoint.strip_prefix(devices::APP_ENDPOINT)
+                    && !apps.iter().any(|a| a.exe.eq_ignore_ascii_case(exe))
+                {
+                    let text = format!("{} \u{00b7} not running", devices::app_display_name(exe));
+                    ui.selectable_value(&mut endpoint, port.endpoint.clone(), text);
+                }
+            }
         })
         .response
         .on_hover_text(selected);
-    let from_bus = endpoint.starts_with(crate::mixer::BUS_SOURCE);
-    if from_bus {
+    // Exclusive mode is for devices, not buses or applications.
+    let device = !endpoint.starts_with(crate::mixer::BUS_SOURCE) && !endpoint.starts_with(devices::APP_ENDPOINT);
+    if !device {
         exclusive = false;
     }
-    ui.add_enabled_ui(!endpoint.is_empty() && !from_bus, |ui| {
+    ui.add_enabled_ui(!endpoint.is_empty() && device, |ui| {
         ui.checkbox(&mut exclusive, RichText::new("Exclusive").small())
             .on_hover_text("Use the device alone, at its lowest latency. Other apps cannot use it meanwhile.");
     });
@@ -432,6 +450,11 @@ pub fn knob_row(
 /// not running.
 pub fn port_status(ui: &mut egui::Ui, port: &PortView) {
     let (color, text, hover) = match port.state.as_str() {
+        "running" if port.endpoint.starts_with(devices::APP_ENDPOINT) => (
+            OK_COLOR,
+            format!("Capturing {}", port.device_name),
+            format!("Buffer {:.1} ms, underruns {}, overruns {}", port.fill_ms, port.underruns, port.overruns),
+        ),
         "running" => (
             OK_COLOR,
             format!("{:.1} kHz \u{00b7} {:+.0} ppm", port.rate as f64 / 1000.0, port.correction_ppm),
@@ -441,6 +464,10 @@ pub fn port_status(ui: &mut egui::Ui, port: &PortView) {
             ),
         ),
         "opening" => (PENDING_COLOR, "Opening\u{2026}".into(), String::new()),
+        "failed" if port.endpoint.starts_with(devices::APP_ENDPOINT) => {
+            let name = devices::app_display_name(&port.endpoint[devices::APP_ENDPOINT.len()..]);
+            (PENDING_COLOR, format!("Waiting for {name}"), port.error.clone())
+        }
         "failed" => (ERROR_COLOR, "Unavailable".into(), port.error.clone()),
         "bus" => (
             Color32::GRAY,

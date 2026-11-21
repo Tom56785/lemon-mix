@@ -18,7 +18,7 @@ use engine::core::Clock;
 use engine::{BusRing, BusSink, BusSpec, Engine, EngineCable, StripSource, StripSpec, Topology};
 
 use crate::config::{Cable, SavedBus, SavedMixer, SavedStrip, save_mixer};
-use crate::protocol::{BusView, ControlAction, DeviceView, Meter, MixerCommand, PortView, StripView};
+use crate::protocol::{AppView, BusView, ControlAction, DeviceView, Meter, MixerCommand, PortView, StripView};
 
 /// The manufacturer string of every cable.
 pub const MANUFACTURER: &str = "Lemon Mix";
@@ -49,6 +49,8 @@ pub struct MixerHost {
     mixer: Mutex<MixerState>,
     clock: Mutex<Option<Clock>>,
     device_lists: Mutex<(Vec<DeviceView>, Vec<DeviceView>)>,
+    /// The applications with sound, refreshed in the background.
+    apps: Mutex<Vec<AppView>>,
     /// When the settings last changed, for saving them a moment later.
     dirty_since: Mutex<Option<Instant>>,
     /// The last meter readings, shared by everyone who reads them close together.
@@ -125,6 +127,7 @@ impl MixerHost {
             mixer: Mutex::new(MixerState { saved, strips: Vec::new(), buses: Vec::new(), cables: Vec::new() }),
             clock: Mutex::new(None),
             device_lists: Mutex::new((Vec::new(), Vec::new())),
+            apps: Mutex::new(Vec::new()),
             dirty_since: Mutex::new(None),
             meter_cache: Mutex::default(),
             persist,
@@ -487,6 +490,14 @@ impl MixerHost {
             Some(bus) => Some(self.resolve(bus, Want::Bus)?.0),
             None => None,
         };
+        let app = endpoint.strip_prefix(devices::APP_ENDPOINT).map(str::trim);
+        match app {
+            Some(_) if !strip => return Err("Only input strips can capture an application.".into()),
+            Some("") => return Err("Name the application's program, such as app:Spotify.exe.".into()),
+            _ => {}
+        }
+        // Capturing an application has no exclusive mode.
+        let exclusive = exclusive && app.is_none();
         let mut mixer = lock(&self.mixer);
         let mut saved = mixer.saved.clone();
         let device = match &from_bus {
@@ -610,6 +621,20 @@ impl MixerHost {
 
     pub fn device_lists(&self) -> (Vec<DeviceView>, Vec<DeviceView>) {
         lock(&self.device_lists).clone()
+    }
+
+    /// Lists the applications with sound again.
+    pub fn refresh_apps(&self) {
+        let apps = devices::list_apps()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| AppView { exe: a.exe, name: a.name, active: a.active })
+            .collect();
+        *lock(&self.apps) = apps;
+    }
+
+    pub fn apps(&self) -> Vec<AppView> {
+        lock(&self.apps).clone()
     }
 
     /// The strips and buses as the window shows them, with their meters
@@ -1088,12 +1113,15 @@ fn port_view(port: &PortHandle, endpoint: String, exclusive: bool) -> PortView {
 const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
 /// Running devices are reported at least this often, for their ratio.
 const DEVICE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the list of applications with sound is refreshed.
+const APPS_INTERVAL: Duration = Duration::from_secs(2);
 /// Settings are saved this long after the last change.
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// Saves changed settings and logs the engine's and devices' health.
 fn housekeeping(host: &std::sync::Weak<MixerHost>, stopping: &AtomicBool) {
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
+    let mut next_apps = Instant::now();
     let mut engine_seen: Option<(u64, u64)> = None;
     let mut devices_seen: HashMap<String, (PortState, u64, u64, u64, Instant)> = HashMap::new();
     while !stopping.load(Ordering::Relaxed) {
@@ -1104,6 +1132,10 @@ fn housekeeping(host: &std::sync::Weak<MixerHost>, stopping: &AtomicBool) {
         let due = lock(&host.dirty_since).is_some_and(|since| since.elapsed() >= SAVE_DELAY);
         if due {
             host.save_now();
+        }
+        if Instant::now() >= next_apps {
+            next_apps = Instant::now() + APPS_INTERVAL;
+            host.refresh_apps();
         }
         if Instant::now() < next_health {
             continue;
@@ -1373,6 +1405,23 @@ mod tests {
         // Back to a device: the strip lets the bus go.
         device("H2", "").unwrap();
         assert_eq!(host.views().0[1].port.as_ref().unwrap().state, "off");
+        host.shutdown();
+    }
+
+    /// An input strip can capture an application, named by its program; a
+    /// bus cannot, and an application has no exclusive mode.
+    #[test]
+    fn input_strips_capture_applications() {
+        let host = MixerHost::new(settings(), SavedMixer::default(), &Logger::discard(), "", false);
+        let device = |id: &str, endpoint: &str| {
+            host.command(&MixerCommand::Device { id: id.into(), endpoint: endpoint.into(), exclusive: true })
+        };
+        device("H1", "app:NoSuchProgram.exe").unwrap();
+        let saved = host.saved_mixer();
+        let h1 = saved.strips.iter().find(|s| s.id == "H1").unwrap();
+        assert_eq!((h1.device.as_str(), h1.exclusive), ("app:NoSuchProgram.exe", false));
+        assert!(device("A1", "app:NoSuchProgram.exe").is_err(), "buses do not capture applications");
+        assert!(device("H2", "app:  ").is_err(), "an application needs a name");
         host.shutdown();
     }
 

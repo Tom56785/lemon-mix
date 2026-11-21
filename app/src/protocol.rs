@@ -137,7 +137,9 @@ pub enum MixerCommand {
     },
     /// The device of a hardware strip (`H1`) or bus (`A1`): "" for none,
     /// "default" for the system default, or an endpoint ID. A strip may
-    /// instead take a bus's output: `bus:` and the bus's key, ID or name.
+    /// instead take a bus's output: `bus:` and the bus's key, ID or name, or
+    /// capture an application: `app:` and its file name, such as
+    /// `app:Spotify.exe`.
     Device {
         id: String,
         endpoint: String,
@@ -168,13 +170,27 @@ pub struct DeviceView {
     pub is_default: bool,
 }
 
+/// An application with sound, which an input strip can capture.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppView {
+    /// The program's file name; a strip captures it with the device
+    /// `app:<exe>`.
+    pub exe: String,
+    /// The name to show.
+    pub name: String,
+    /// Whether it is playing now.
+    pub active: bool,
+}
+
 /// A hardware strip's or bus's device and its stream.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PortView {
     pub endpoint: String,
     pub exclusive: bool,
     /// off, opening, running or failed; `bus` for a strip fed from a bus,
-    /// whose name is then in `device_name`.
+    /// whose name is then in `device_name`. A strip capturing an application
+    /// is running while it captures, and failed while it waits for the
+    /// application to start.
     pub state: String,
     pub device_name: String,
     pub error: String,
@@ -242,6 +258,9 @@ pub struct Snapshot {
     pub buses: Vec<BusView>,
     pub capture_devices: Vec<DeviceView>,
     pub render_devices: Vec<DeviceView>,
+    /// The applications with sound, for input strips to capture.
+    #[serde(default)]
+    pub apps: Vec<AppView>,
     /// The latency between cable playback and the mixer, in ms.
     pub latency_ms: i64,
 }

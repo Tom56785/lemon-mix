@@ -63,6 +63,41 @@ pub fn list_devices(direction: Direction) -> Result<Vec<DeviceInfo>, String> {
     }
 }
 
+/// What a capture port's endpoint starts with when it records an
+/// application's sound: `app:` and the program's file name, such as
+/// `app:Spotify.exe`. The port follows the program as it closes and starts.
+pub const APP_ENDPOINT: &str = "app:";
+
+/// An application that has played sound since it started.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppInfo {
+    /// The program's file name, which a port's endpoint names it by.
+    pub exe: String,
+    /// The file name without `.exe`, to show.
+    pub name: String,
+    /// Whether it is playing now.
+    pub active: bool,
+}
+
+/// The name an application is shown by: its file name without `.exe`.
+pub fn app_display_name(exe: &str) -> String {
+    let stem = exe.rsplit_once('.').filter(|(_, ext)| ext.eq_ignore_ascii_case("exe")).map_or(exe, |(stem, _)| stem);
+    stem.to_string()
+}
+
+/// The applications with sound on any playback device, by program, in
+/// alphabetical order.
+pub fn list_apps() -> Result<Vec<AppInfo>, String> {
+    #[cfg(windows)]
+    {
+        crate::wasapi::list_apps()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Vec::new())
+    }
+}
+
 /// What a port shows besides its counters.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PortStatus {
@@ -320,7 +355,11 @@ fn supervise(port: &PortShared) {
 
 #[cfg(windows)]
 fn run(port: &PortShared, choice: &DeviceChoice, generation: u64) -> Result<(), String> {
-    crate::wasapi::run_stream(port, choice, generation)
+    match choice.endpoint.strip_prefix(APP_ENDPOINT) {
+        Some(exe) if port.direction == Direction::Capture => crate::wasapi::run_app_stream(port, exe, generation),
+        Some(_) => Err("only inputs can capture an application".into()),
+        None => crate::wasapi::run_stream(port, choice, generation),
+    }
 }
 
 #[cfg(not(windows))]
