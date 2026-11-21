@@ -374,14 +374,6 @@ impl App {
             )
         };
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
-            ui.painter().circle_filled(rect.center(), 8.0, LEMON);
-            ui.heading(RichText::new("Lemon Mix").strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled_ui(!busy, |ui| self.options_menu(ui, mode, state));
-            });
-        });
         let server = if !server_error.is_empty() {
             (Tone::Error, "USB/IP server error \u{00b7} see the diagnostic log in the settings folder".to_string())
         } else {
@@ -392,7 +384,13 @@ impl App {
             };
             (Tone::Ok, format!("USB/IP server running \u{00b7} {devices}"))
         };
-        widgets::status_line(ui, server.0, &server.1, None);
+        // The first line carries the Options menu at its right end.
+        ui.horizontal(|ui| {
+            widgets::status_line(ui, server.0, &server.1, None);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_enabled_ui(!busy, |ui| self.options_menu(ui, mode, state));
+            });
+        });
         let mode_line = match (busy_text, mode, state) {
             (Some(text), ..) => (Tone::Pending, text),
             (None, Mode::Service, _) if connected && version != crate::VERSION => {
