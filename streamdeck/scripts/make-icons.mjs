@@ -18,12 +18,12 @@ function rotate(x, y, angle) {
 
 /** The colour at a point of the unit square, or nothing where it is transparent. */
 function shade(x, y) {
-	const [lx, ly] = rotate(x - 0.7, y - 0.2, 0.6);
+	const [lx, ly] = rotate(x - 0.76, y - 0.22, 2.21); // from the stem end
 	if ((lx / 0.17) ** 2 + (ly / 0.075) ** 2 <= 1) {
 		const vein = Math.abs(ly) < 0.008 && Math.abs(lx) < 0.15;
 		return vein ? [0.2, 0.45, 0.16] : [0.33, 0.62, 0.22];
 	}
-	const [ex, ey] = rotate(x - 0.48, y - 0.55, -0.52);
+	const [ex, ey] = rotate(x - 0.48, y - 0.55, 0.52);
 	const tip = (t) => Math.max(Math.abs(t) - 0.36, 0) * 1.6;
 	const half = Math.max(0.3 - tip(ex), 1e-6); // half the height, narrowing to the tips
 	const radius = (ex / 0.4) ** 2 + Math.min((ey / half) ** 2, 1e9);

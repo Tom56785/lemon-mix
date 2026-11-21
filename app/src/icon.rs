@@ -39,14 +39,14 @@ pub fn lemon_rgba(size: u32) -> Vec<u8> {
 /// The colour (premultiplied, with alpha) at a point of the unit square, or
 /// nothing where the icon is transparent.
 fn shade(x: f32, y: f32) -> Option<[f32; 4]> {
-    // The leaf, at the top right, above the fruit.
-    let (lx, ly) = rotate(x - 0.70, y - 0.20, 0.6);
+    // The leaf, growing from the lemon's top right end (its stem end).
+    let (lx, ly) = rotate(x - 0.76, y - 0.22, 2.21);
     if (lx / 0.17).powi(2) + (ly / 0.075).powi(2) <= 1.0 {
         let vein = ly.abs() < 0.008 && lx.abs() < 0.15;
         return Some(if vein { [0.20, 0.45, 0.16, 1.0] } else { [0.33, 0.62, 0.22, 1.0] });
     }
-    // The lemon: an ellipse tilted by 30 degrees, with pointed ends.
-    let (ex, ey) = rotate(x - 0.48, y - 0.55, -0.52);
+    // The lemon: an ellipse rising 30 degrees to the right, with pointed ends.
+    let (ex, ey) = rotate(x - 0.48, y - 0.55, 0.52);
     let tip = |t: f32| (t.abs() - 0.36).max(0.0) * 1.6;
     let half = (0.30 - tip(ex)).max(1e-6); // half the height, narrowing to the tips
     let radius = (ex / 0.40).powi(2) + (ey / half).powi(2).min(1e9);
