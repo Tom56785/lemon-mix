@@ -32,8 +32,8 @@ use clap::Parser;
 
 use crate::cli::Cli;
 use crate::config::{
-    Cable, Config, DEFAULT_BUFFER_MS, DEFAULT_LATENCY_MS, DEFAULT_LISTEN, MAX_BUFFER_MS, MAX_CABLES, MIN_BUFFER_MS,
-    config_bool, config_cables, config_int, config_mixer, config_string, ensure_config_file, hardware_counts,
+    Cable, Config, DEFAULT_BUFFER_MS, DEFAULT_HARDWARE_PORTS, DEFAULT_LATENCY_MS, DEFAULT_LISTEN, MAX_BUFFER_MS, MAX_CABLES, MIN_BUFFER_MS,
+    config_bool, config_cables, config_int, config_string, ensure_config_file,
     load_config_content, numbered_cables, parse_config,
 };
 use crate::mixer::{HostSettings, MANUFACTURER, MixerHost};
@@ -203,7 +203,15 @@ fn run(logger: &Logger, log_path: &str, parsed: Result<Cli, clap::Error>) -> i32
     }
 
     ensure_config_file(logger);
-    let host = MixerHost::new(settings, config_mixer(&config), logger, log_path, true);
+    let mixer = config::load_active_profile(&settings.profile).map_or_else(
+        |err| {
+            logf!(logger, "Using default mixer settings: {err}");
+            config::SavedMixer::default()
+        },
+        |(mixer, _)| mixer,
+    );
+    logf!(logger, "Profile: {}", settings.profile);
+    let host = MixerHost::new(settings, mixer, logger, log_path, true);
     host.set_initial_cables(cables);
 
     #[cfg(windows)]
@@ -289,8 +297,11 @@ fn host_settings(cli: &Cli, config: &Config, logger: &Logger) -> HostSettings {
         );
         buffer_ms = DEFAULT_BUFFER_MS;
     }
-    // As many hardware strips and buses as config.toml has tables for.
-    let (hardware_inputs, hardware_outputs) = hardware_counts(config);
+    // As many hardware strips and buses as the active profile has tables for.
+    let profile = config::config_profile(config);
+    let defaults = (DEFAULT_HARDWARE_PORTS as usize, DEFAULT_HARDWARE_PORTS as usize);
+    let (hardware_inputs, hardware_outputs) =
+        config::load_active_profile(&profile).map_or(defaults, |(_, counts)| counts);
 
     let mut stall_test_ms = cli.stall_test_ms.unwrap_or_else(|| config_int(config, "stall_test_ms", 0));
     if !(0..=MAX_STALL_TEST_MS).contains(&stall_test_ms) {
@@ -314,6 +325,7 @@ fn host_settings(cli: &Cli, config: &Config, logger: &Logger) -> HostSettings {
         buffer_ms,
         hardware_inputs,
         hardware_outputs,
+        profile,
     }
 }
 
@@ -394,6 +406,7 @@ fn run_self_test(descriptors: &[Descriptors], logger: &Logger) -> Result<(), Str
         buffer_ms: DEFAULT_BUFFER_MS,
         hardware_inputs: 1,
         hardware_outputs: 1,
+        profile: config::DEFAULT_PROFILE.into(),
     };
     let host = MixerHost::new(settings, config::SavedMixer::default(), logger, "", false);
     let cable = Cable::numbered(1);
@@ -480,7 +493,7 @@ fn new_application_logger(fresh: bool) -> (Logger, Option<LogCloser>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DEFAULT_HARDWARE_PORTS;
+
 
     #[test]
     fn application_log_starts_fresh() {
@@ -545,21 +558,22 @@ mod tests {
         let config = parse_config("latency_ms = 0\nbuffer_ms = 1000\n").unwrap();
         let settings = host_settings(&Cli::default(), &config, &Logger::discard());
         assert_eq!((settings.latency_ms, settings.buffer_ms), (DEFAULT_LATENCY_MS, DEFAULT_BUFFER_MS));
-        let defaults = DEFAULT_HARDWARE_PORTS as usize;
-        assert_eq!((settings.hardware_inputs, settings.hardware_outputs), (defaults, defaults), "a new file");
     }
 
+    /// The hardware strips and buses are the active profile's.
     #[test]
-    fn hardware_strips_and_buses_are_counted_from_their_tables() {
+    fn hardware_strips_and_buses_come_from_the_active_profile() {
+        let _guard = config::tests::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        config::tests::temp_app_data("main-profile");
         let counts = |content: &str| {
             let settings = host_settings(&Cli::default(), &parse_config(content).unwrap(), &Logger::discard());
-            (settings.hardware_inputs, settings.hardware_outputs)
+            (settings.profile, settings.hardware_inputs, settings.hardware_outputs)
         };
-        // Up to the highest numbered table; the old count settings are ignored.
-        let tables = "hardware_inputs = 9\n[[strip]]\nid = \"H1\"\n[[strip]]\nid = \"H3\"\n[[strip]]\nid = \"V2\"\n\
-                      [[bus]]\nid = \"B2\"\n";
-        assert_eq!(counts(tables), (3, 0));
-        // An empty list is none; no list at all is a new file.
-        assert_eq!(counts("strip = []\n"), (0, DEFAULT_HARDWARE_PORTS as usize));
+        let defaults = DEFAULT_HARDWARE_PORTS as usize;
+        assert_eq!(counts(""), ("Default".into(), defaults, defaults), "no profile file yet");
+        std::fs::create_dir_all(config::profiles_dir()).unwrap();
+        let tables = "[[strip]]\nid = \"H1\"\n[[strip]]\nid = \"H3\"\n[[strip]]\nid = \"V2\"\n\n[[bus]]\nid = \"B2\"\n";
+        std::fs::write(config::profiles_dir().join("Live.toml"), tables).unwrap();
+        assert_eq!(counts("profile = \"Live\"\n"), ("Live".into(), 3, 0));
     }
 }

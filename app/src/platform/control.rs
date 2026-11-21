@@ -90,6 +90,7 @@ pub fn snapshot() -> Snapshot {
     };
     let (strips, buses) = host.views();
     let (capture_devices, render_devices) = host.device_lists();
+    let (profile, profiles) = host.profiles();
     Snapshot {
         cables: lock(&CABLES)
             .iter()
@@ -102,6 +103,8 @@ pub fn snapshot() -> Snapshot {
         capture_devices,
         render_devices,
         apps: host.apps(),
+        profile,
+        profiles,
         latency_ms: host.latency_ms(),
     }
 }

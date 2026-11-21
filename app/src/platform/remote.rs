@@ -245,7 +245,8 @@ fn subscription_events(mut snapshot: Snapshot) -> (String, String) {
             (port.fill_ms, port.correction_ppm) = (0.0, 0.0);
         }
     }
-    let state = Event::State { protocol: PROTOCOL_VERSION, version: crate::VERSION.to_string(), snapshot };
+    let state =
+        Event::State { protocol: PROTOCOL_VERSION, version: crate::VERSION.to_string(), snapshot: Box::new(snapshot) };
     let json = |event: &Event| serde_json::to_string(event).unwrap_or_else(|_| "{}".into());
     (json(&state), json(&meters))
 }

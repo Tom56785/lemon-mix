@@ -658,10 +658,123 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
     Ok(keep_line_endings(content, document.to_string()))
 }
 
-pub fn save_mixer(mixer: &SavedMixer) -> io::Result<()> {
+// ---- Profiles ----------------------------------------------------------------
+//
+// The strips' and buses' settings live in profiles: a file each in the profiles
+// folder beside config.toml, with [[strip]] and [[bus]] tables. config.toml
+// names the active profile as `profile`; the mixer saves its changes straight
+// into that profile's file.
+
+/// The profile in use until another is made.
+pub const DEFAULT_PROFILE: &str = "Default";
+const PROFILE_KEY: &str = "profile";
+
+pub fn profiles_dir() -> PathBuf {
+    application_data_dir().join("profiles")
+}
+
+fn profile_path(name: &str) -> PathBuf {
+    profiles_dir().join(format!("{name}.toml"))
+}
+
+/// The name of the active profile, from config.toml.
+pub fn config_profile(config: &Config) -> String {
+    config_string(config, PROFILE_KEY, DEFAULT_PROFILE)
+}
+
+/// Puts a profile name in its standard form: trimmed, with each run of spaces
+/// reduced to one; letters, digits, spaces, hyphens, underscores and
+/// parentheses only, at most 64 characters, and unlike every name in `taken`
+/// ignoring case.
+pub fn validate_profile_name(name: &str, taken: &[String]) -> Result<String, String> {
+    let name = name.split(' ').filter(|word| !word.is_empty()).collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return Err("Enter a name for the profile.".into());
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '(' | ')')) {
+        return Err(
+            "Profile names can contain only letters, digits, spaces, hyphens, underscores and parentheses.".into()
+        );
+    }
+    if name.chars().count() > MAX_CABLE_NAME {
+        return Err(format!("Profile names can be at most {MAX_CABLE_NAME} characters long."));
+    }
+    if taken.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
+        return Err(format!("There is already a profile named \"{name}\"."));
+    }
+    Ok(name)
+}
+
+/// Every profile: the files in the profiles folder and the active one,
+/// which has no file until another profile is switched to.
+pub fn list_profiles(active: &str) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(profiles_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let stem = name.strip_suffix(".toml")?;
+            validate_profile_name(stem, &[]).ok().filter(|valid| valid == stem)
+        })
+        .collect();
+    if !names.iter().any(|n| n.eq_ignore_ascii_case(active)) {
+        names.push(active.to_string());
+    }
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+/// Writes `mixer`'s strips and buses to a profile's file. A file that is not
+/// valid TOML (being edited by hand, say) is not overwritten.
+pub fn save_profile(name: &str, mixer: &SavedMixer) -> io::Result<()> {
+    fs::create_dir_all(profiles_dir())?;
+    let path = profile_path(name);
+    let existing = fs::read(&path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
+    let updated = set_mixer_entries(&existing, mixer)
+        .map_err(|err| io::Error::other(format!("{} is not valid TOML, so it was left as it is: {err}", path.display())))?;
+    fs::write(path, updated.trim_start())
+}
+
+/// The active profile's strips and buses, and how many hardware strips and
+/// buses it has. A profile with no file yet, as on first start, is a new
+/// configuration: five hardware inputs and outputs with default settings.
+pub fn load_active_profile(name: &str) -> Result<(SavedMixer, (usize, usize)), String> {
+    if !profile_path(name).exists() {
+        let ports = DEFAULT_HARDWARE_PORTS as usize;
+        return Ok((SavedMixer::default(), (ports, ports)));
+    }
+    load_profile(name)
+}
+
+/// A profile's strips and buses, and how many hardware strips and buses it has.
+pub fn load_profile(name: &str) -> Result<(SavedMixer, (usize, usize)), String> {
+    let content =
+        fs::read_to_string(profile_path(name)).map_err(|_| format!("The profile \"{name}\" was not found."))?;
+    let config = parse_config(&content).map_err(|err| format!("The profile \"{name}\" could not be read: {err}"))?;
+    Ok((config_mixer(&config), hardware_counts(&config)))
+}
+
+pub fn delete_profile(name: &str) -> io::Result<()> {
+    fs::remove_file(profile_path(name))
+}
+
+/// Records the active profile in config.toml, keeping everything else.
+pub fn save_active_profile(name: &str) -> io::Result<()> {
     fs::create_dir_all(application_data_dir())?;
-    let updated = set_mixer_entries(&current_content(), mixer).map_err(io::Error::other)?;
-    fs::write(config_file_path(), updated)
+    let content = current_content();
+    let mut document = parse_config(&content).map_err(io::Error::other)?.document;
+    match document.get_mut(PROFILE_KEY).and_then(Item::as_value_mut) {
+        Some(existing) => {
+            let decor = existing.decor().clone();
+            *existing = name.into();
+            *existing.decor_mut() = decor;
+        }
+        None => {
+            document.insert(PROFILE_KEY, value(name));
+        }
+    }
+    fs::write(config_file_path(), keep_line_endings(&content, document.to_string()))
 }
 
 #[cfg(test)]
@@ -753,7 +866,8 @@ pub(crate) mod tests {
         ensure_config_file(&logger);
         assert_eq!(fs::read_to_string(config_file_path()).unwrap(), "listen = \"x\"\n");
 
-        // Saving the cables and the mixer keeps the comments and the other settings.
+        // Saving the cables keeps the comments and the other settings, and the
+        // mixer goes to the active profile's file.
         let mine = "# mine\nlisten = \"127.0.0.1:4000\" # my port\nlatency_ms = 30\n\n";
         fs::write(config_file_path(), format!("{mine}{}", cable_table("1", "\"VCABLE-001\"", "\"Virtual Cable 01\"")))
             .unwrap();
@@ -778,16 +892,26 @@ pub(crate) mod tests {
                 exclusive: true,
             }],
         };
-        save_mixer(&mixer).unwrap();
+        fs::create_dir_all(profiles_dir()).unwrap();
+        fs::write(profile_path("Default"), "# my profile\n").unwrap();
+        save_profile("Default", &mixer).unwrap();
         let saved = fs::read_to_string(config_file_path()).unwrap();
         assert!(saved.starts_with(mine), "{saved:?}");
         assert!(
             saved.contains("[[cable]]\nid = 3\nserial = \"8F3A2C1D\"\nname = \"Game\"\nkind = \"output\"\n"),
             "{saved:?}"
         );
-        let config = parse_config(&saved).unwrap();
-        assert_eq!(config_cables(&config), cables);
-        assert_eq!(config_mixer(&config), mixer);
+        assert!(!saved.contains("[[strip]]") && !saved.contains("strip ="), "{saved:?}");
+        assert_eq!(config_cables(&parse_config(&saved).unwrap()), cables);
+        let profile = fs::read_to_string(profile_path("Default")).unwrap();
+        let profile_config = parse_config(&profile).unwrap();
+        assert_eq!(config_mixer(&profile_config), mixer);
+        assert_eq!(load_active_profile("Default").unwrap(), (mixer.clone(), (1, 1)));
+        assert_eq!(load_active_profile("Nothing yet").unwrap(), (SavedMixer::default(), (5, 5)), "a new profile");
+        // A profile file being edited by hand, and broken, is left alone.
+        fs::write(profile_path("Default"), "[[strip]\n").unwrap();
+        assert!(save_profile("Default", &mixer).is_err());
+        assert_eq!(fs::read_to_string(profile_path("Default")).unwrap(), "[[strip]\n");
     }
 
     /// The tables are the count of hardware strips and buses: none is saved

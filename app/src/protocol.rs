@@ -98,7 +98,7 @@ pub enum ControlAction {
 pub enum Event {
     /// The whole state, first and then whenever it changes. Its meters are
     /// left at zero: they come in `Meters`.
-    State { protocol: u32, version: String, snapshot: Snapshot },
+    State { protocol: u32, version: String, snapshot: Box<Snapshot> },
     /// Every strip's and bus's meter, in the order of the last state.
     Meters { strips: Vec<KeyedMeter>, buses: Vec<KeyedMeter> },
 }
@@ -159,6 +159,21 @@ pub enum MixerCommand {
     /// move up a number.
     RemoveBus {
         id: String,
+    },
+    /// Make a profile, from the current settings or a new configuration's,
+    /// and switch to it.
+    CreateProfile {
+        name: String,
+        #[serde(default)]
+        from_defaults: bool,
+    },
+    /// Delete a profile other than the active one.
+    DeleteProfile {
+        name: String,
+    },
+    /// Save the current settings to the active profile and take up another's.
+    SwitchProfile {
+        name: String,
     },
 }
 
@@ -261,6 +276,12 @@ pub struct Snapshot {
     /// The applications with sound, for input strips to capture.
     #[serde(default)]
     pub apps: Vec<AppView>,
+    /// The active profile.
+    #[serde(default)]
+    pub profile: String,
+    /// Every profile, in alphabetical order.
+    #[serde(default)]
+    pub profiles: Vec<String>,
     /// The latency between cable playback and the mixer, in ms.
     pub latency_ms: i64,
 }

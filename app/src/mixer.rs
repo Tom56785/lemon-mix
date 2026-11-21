@@ -17,7 +17,7 @@ use devices::{DeviceChoice, DeviceManager, Direction, PortHandle, PortState};
 use engine::core::Clock;
 use engine::{BusRing, BusSink, BusSpec, Engine, EngineCable, StripSource, StripSpec, Topology};
 
-use crate::config::{Cable, SavedBus, SavedMixer, SavedStrip, save_mixer};
+use crate::config::{Cable, SavedBus, SavedMixer, SavedStrip};
 use crate::protocol::{AppView, BusView, ControlAction, DeviceView, Meter, MixerCommand, PortView, StripView};
 
 /// The manufacturer string of every cable.
@@ -32,6 +32,8 @@ pub struct HostSettings {
     pub buffer_ms: i64,
     pub hardware_inputs: usize,
     pub hardware_outputs: usize,
+    /// The active profile.
+    pub profile: String,
 }
 
 pub struct MixerHost {
@@ -51,6 +53,10 @@ pub struct MixerHost {
     device_lists: Mutex<(Vec<DeviceView>, Vec<DeviceView>)>,
     /// The applications with sound, refreshed in the background.
     apps: Mutex<Vec<AppView>>,
+    /// The name of the active profile.
+    profile: Mutex<String>,
+    /// Every profile, read from the profiles folder when they change.
+    profile_list: Mutex<Vec<String>>,
     /// When the settings last changed, for saving them a moment later.
     dirty_since: Mutex<Option<Instant>>,
     /// The last meter readings, shared by everyone who reads them close together.
@@ -128,6 +134,8 @@ impl MixerHost {
             clock: Mutex::new(None),
             device_lists: Mutex::new((Vec::new(), Vec::new())),
             apps: Mutex::new(Vec::new()),
+            profile: Mutex::new(settings.profile.clone()),
+            profile_list: Mutex::new(crate::config::list_profiles(&settings.profile)),
             dirty_since: Mutex::new(None),
             meter_cache: Mutex::default(),
             persist,
@@ -163,21 +171,7 @@ impl MixerHost {
                 default(render)
             );
         }
-        {
-            let mixer = lock(&self.mixer);
-            for (n, port) in lock(&self.inputs).iter().enumerate() {
-                if let Some(strip) = mixer.saved.strips.iter().find(|s| s.id == hardware_strip_id(n + 1))
-                    && bus_source_key(&strip.device).is_none()
-                {
-                    port.configure(DeviceChoice { endpoint: strip.device.clone(), exclusive: strip.exclusive });
-                }
-            }
-            for (n, port) in lock(&self.outputs).iter().enumerate() {
-                if let Some(bus) = mixer.saved.buses.iter().find(|b| b.id == hardware_bus_id(n + 1)) {
-                    port.configure(DeviceChoice { endpoint: bus.device.clone(), exclusive: bus.exclusive });
-                }
-            }
-        }
+        self.configure_ports();
         let mut workers = lock(&self.workers);
         if workers.is_empty() {
             self.stopping.store(false, Ordering::Relaxed);
@@ -190,6 +184,124 @@ impl MixerHost {
                     .expect("start the housekeeping thread"),
             );
         }
+    }
+
+    /// Points each hardware port at its saved device: none for a strip fed
+    /// from a bus.
+    fn configure_ports(&self) {
+        let mixer = lock(&self.mixer);
+        for (n, port) in lock(&self.inputs).iter().enumerate() {
+            let choice = match mixer.saved.strips.iter().find(|s| s.id == hardware_strip_id(n + 1)) {
+                Some(strip) if bus_source_key(&strip.device).is_none() => {
+                    DeviceChoice { endpoint: strip.device.clone(), exclusive: strip.exclusive }
+                }
+                _ => DeviceChoice::default(),
+            };
+            port.configure(choice);
+        }
+        for (n, port) in lock(&self.outputs).iter().enumerate() {
+            let choice = match mixer.saved.buses.iter().find(|b| b.id == hardware_bus_id(n + 1)) {
+                Some(bus) => DeviceChoice { endpoint: bus.device.clone(), exclusive: bus.exclusive },
+                None => DeviceChoice::default(),
+            };
+            port.configure(choice);
+        }
+    }
+
+    /// The active profile and every profile there is.
+    pub fn profiles(&self) -> (String, Vec<String>) {
+        (lock(&self.profile).clone(), lock(&self.profile_list).clone())
+    }
+
+    /// Reads the profiles folder again, after a profile is made or deleted.
+    fn refresh_profiles(&self) {
+        let active = lock(&self.profile).clone();
+        *lock(&self.profile_list) = crate::config::list_profiles(&active);
+    }
+
+    /// Makes a profile, from the current settings or (with `from_defaults`)
+    /// those of a new configuration, and switches to it.
+    fn create_profile(&self, name: &str, from_defaults: bool) -> Result<(), String> {
+        let (_, existing) = self.profiles();
+        let name = crate::config::validate_profile_name(name, &existing)?;
+        let settings = if from_defaults {
+            // A new configuration's: five hardware inputs and outputs with
+            // default settings. Cables' strips and buses get theirs when the
+            // profile is taken up.
+            let cables = lock(&self.mixer).cables.clone();
+            let ports = crate::config::DEFAULT_HARDWARE_PORTS as usize;
+            SavedMixer {
+                strips: (1..=ports).map(|n| default_strip(&hardware_strip_id(n), &cables)).collect(),
+                buses: (1..=ports).map(|n| default_bus(&hardware_bus_id(n))).collect(),
+            }
+        } else {
+            self.saved_mixer()
+        };
+        crate::config::save_profile(&name, &settings)
+            .map_err(|err| format!("The profile could not be saved: {err}"))?;
+        self.refresh_profiles();
+        logf!(self.logger, "Created profile \"{name}\"");
+        self.switch_profile(&name)
+    }
+
+    /// Deletes a profile other than the active one.
+    fn delete_profile(&self, name: &str) -> Result<(), String> {
+        if lock(&self.profile).eq_ignore_ascii_case(name) {
+            return Err("The active profile cannot be deleted: switch to another one first.".into());
+        }
+        crate::config::delete_profile(name).map_err(|_| format!("The profile \"{name}\" was not found."))?;
+        self.refresh_profiles();
+        logf!(self.logger, "Deleted profile \"{name}\"");
+        Ok(())
+    }
+
+    /// Saves the current settings to the active profile, and takes up those of
+    /// profile `name`: its strips and buses, as many hardware ones as it has,
+    /// and their devices.
+    fn switch_profile(&self, name: &str) -> Result<(), String> {
+        let (active, all) = self.profiles();
+        let name =
+            all.iter().find(|p| p.eq_ignore_ascii_case(name)).ok_or(format!("There is no profile \"{name}\"."))?;
+        if *name == active {
+            return Ok(());
+        }
+        let (saved, (inputs, outputs)) = crate::config::load_profile(name)?;
+        crate::config::save_profile(&active, &self.saved_mixer())
+            .map_err(|err| format!("The current settings could not be saved to \"{active}\": {err}"))?;
+        let server = lock(&self.server);
+        let mut mixer = lock(&self.mixer);
+        let mut removed = Vec::new();
+        for (ports, count, strip) in [(&self.inputs, inputs, true), (&self.outputs, outputs, false)] {
+            let mut ports = lock(ports);
+            while ports.len() > count {
+                removed.extend(ports.pop());
+            }
+            while ports.len() < count {
+                let n = ports.len() + 1;
+                ports.push(if strip {
+                    self.devices.capture(&hardware_strip_id(n))
+                } else {
+                    self.devices.render(&hardware_bus_id(n))
+                });
+            }
+        }
+        mixer.saved = saved;
+        let cables = mixer.cables.clone();
+        drop(mixer);
+        self.rebuild_with(&cables, &server.audio);
+        drop(server);
+        // The ports keep their devices while the mixer runs; a suspended one
+        // takes them up when it starts.
+        if lock(&self.clock).is_some() {
+            self.configure_ports();
+        }
+        // Closing a device waits for its stream to stop.
+        drop(removed);
+        *lock(&self.profile) = name.clone();
+        self.refresh_profiles();
+        crate::config::save_active_profile(name).map_err(|err| format!("The profile could not be recorded: {err}"))?;
+        logf!(self.logger, "Switched to profile \"{name}\"");
+        Ok(())
     }
 
     /// Stops the engine and lets the physical devices go, so another process
@@ -548,6 +660,9 @@ impl MixerHost {
                 self.refresh_devices();
                 return Ok(());
             }
+            MixerCommand::CreateProfile { name, from_defaults } => self.create_profile(name, *from_defaults)?,
+            MixerCommand::DeleteProfile { name } => return self.delete_profile(name),
+            MixerCommand::SwitchProfile { name } => self.switch_profile(name)?,
             MixerCommand::AddStrip => self.add_hardware(true),
             MixerCommand::AddBus => self.add_hardware(false),
             MixerCommand::RemoveStrip { id } => self.remove_hardware(id, true)?,
@@ -946,9 +1061,10 @@ impl MixerHost {
         if lock(&self.dirty_since).take().is_none() || !self.persist {
             return;
         }
-        let saved = self.saved_mixer();
-        if let Err(err) = save_mixer(&saved) {
-            logf!(self.logger, "Could not save the mixer settings: {err}");
+        // The settings live in the active profile's file.
+        let profile = lock(&self.profile).clone();
+        if let Err(err) = crate::config::save_profile(&profile, &self.saved_mixer()) {
+            logf!(self.logger, "Could not save the mixer settings to profile \"{profile}\": {err}");
         }
     }
 }
@@ -1210,6 +1326,7 @@ mod tests {
             buffer_ms: 20,
             hardware_inputs: 2,
             hardware_outputs: 2,
+            profile: crate::config::DEFAULT_PROFILE.into(),
         }
     }
 
@@ -1422,6 +1539,63 @@ mod tests {
         assert_eq!((h1.device.as_str(), h1.exclusive), ("app:NoSuchProgram.exe", false));
         assert!(device("A1", "app:NoSuchProgram.exe").is_err(), "buses do not capture applications");
         assert!(device("H2", "app:  ").is_err(), "an application needs a name");
+        host.shutdown();
+    }
+
+    /// Profiles keep their own strip and bus settings, and their own number
+    /// of hardware strips and buses; switching saves the active one first.
+    #[test]
+    fn profiles_switch_settings_and_hardware() {
+        let _guard = crate::config::tests::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::config::tests::temp_app_data("profiles");
+        let host = MixerHost::new(settings(), SavedMixer::default(), &Logger::discard(), "", false);
+        let gain = |host: &MixerHost| host.views().0[0].params.gain_db;
+        let hardware = |host: &MixerHost| {
+            let (strips, buses) = host.views();
+            (
+                strips.iter().filter(|s| s.id.starts_with('H')).count(),
+                buses.iter().filter(|b| b.id.starts_with('A')).count(),
+            )
+        };
+        let set_gain = |db: f32| {
+            host.control(&ControlAction::Gain { target: "H1".into(), db }).unwrap();
+        };
+        let command = |command: MixerCommand| host.command(&command);
+
+        set_gain(-6.0);
+        command(MixerCommand::CreateProfile { name: " Gaming   night ".into(), from_defaults: false }).unwrap();
+        assert_eq!(
+            host.profiles(),
+            ("Gaming night".to_string(), vec!["Default".to_string(), "Gaming night".to_string()])
+        );
+        assert_eq!(gain(&host), -6.0, "a copy of the current settings");
+        set_gain(-20.0);
+        command(MixerCommand::AddStrip).unwrap();
+        assert_eq!(hardware(&host), (3, 2));
+
+        command(MixerCommand::SwitchProfile { name: "default".into() }).unwrap();
+        assert_eq!((gain(&host), hardware(&host)), (-6.0, (2, 2)));
+        command(MixerCommand::SwitchProfile { name: "Gaming night".into() }).unwrap();
+        assert_eq!((gain(&host), hardware(&host)), (-20.0, (3, 2)), "the settings it was left with");
+
+        command(MixerCommand::CreateProfile { name: "Fresh".into(), from_defaults: true }).unwrap();
+        assert_eq!((gain(&host), hardware(&host)), (0.0, (5, 5)), "a new configuration's");
+        let file = |name: &str| std::fs::read_to_string(crate::config::profiles_dir().join(format!("{name}.toml"))).unwrap();
+        let fresh = file("Fresh");
+        assert!(fresh.starts_with("[[strip]]
+id = \"H1\""), "{fresh}");
+        assert!(fresh.contains("id = \"H5\"") && fresh.contains("id = \"A5\"") && fresh.contains("device = \"default\""), "{fresh}");
+        assert!(!fresh.contains('#'), "no comments: {fresh}");
+        assert!(file("Default").starts_with("[[strip]]"), "the profile switched away from was saved");
+        assert!(command(MixerCommand::CreateProfile { name: "fresh".into(), from_defaults: true }).is_err());
+        assert!(command(MixerCommand::CreateProfile { name: "a/b".into(), from_defaults: true }).is_err());
+        assert!(command(MixerCommand::DeleteProfile { name: "Fresh".into() }).is_err(), "it is active");
+        assert!(command(MixerCommand::SwitchProfile { name: "Nowhere".into() }).is_err());
+        command(MixerCommand::DeleteProfile { name: "Gaming night".into() }).unwrap();
+        assert_eq!(host.profiles().1, ["Default", "Fresh"]);
+        let config =
+            crate::config::parse_config(&std::fs::read_to_string(crate::config::config_file_path()).unwrap()).unwrap();
+        assert_eq!(crate::config::config_profile(&config), "Fresh");
         host.shutdown();
     }
 

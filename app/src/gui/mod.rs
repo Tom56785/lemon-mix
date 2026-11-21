@@ -135,6 +135,8 @@ enum Question {
     RemoveStrip(String, String),
     /// A hardware bus, by ID and label.
     RemoveBus(String, String),
+    /// A profile, by name.
+    DeleteProfile(String),
 }
 
 struct App {
@@ -157,6 +159,8 @@ struct App {
     new_cable_name: String,
     new_cable_kind: String,
     renaming: Option<(String, String)>,
+    /// The profiles dialog, while it is open.
+    profile_dialog: Option<ProfileDialog>,
     editing_label: Option<(String, String)>,
     _tray: Option<tray_icon::TrayIcon>,
 }
@@ -191,6 +195,7 @@ impl App {
             new_cable_name: String::new(),
             new_cable_kind: "loopback".into(),
             renaming: None,
+            profile_dialog: None,
             editing_label: None,
             _tray: tray,
         };
@@ -346,7 +351,10 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        let modal = self.question.is_some() || !lock(&self.shared).errors.is_empty() || self.renaming.is_some();
+        let modal = self.question.is_some()
+            || !lock(&self.shared).errors.is_empty()
+            || self.renaming.is_some()
+            || self.profile_dialog.is_some();
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_enabled_ui(!modal, |ui| self.header(ui, mode, busy));
         });
@@ -391,7 +399,18 @@ impl App {
         ui.horizontal(|ui| {
             widgets::status_line(ui, server.0, &server.1, None);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled_ui(!busy, |ui| self.options_menu(ui, mode, state));
+                ui.add_enabled_ui(!busy, |ui| {
+                    self.options_menu(ui, mode, state);
+                    let profile = lock(&self.shared).snapshot.profile.clone();
+                    if !profile.is_empty()
+                        && ui
+                            .button(format!("Profile: {profile}"))
+                            .on_hover_text("Switch, create or delete profiles")
+                            .clicked()
+                    {
+                        self.profile_dialog = Some(ProfileDialog::default());
+                    }
+                });
             });
         });
         let mode_line = match (busy_text, mode, state) {
@@ -871,6 +890,10 @@ impl App {
             }
             return;
         }
+        if self.question.is_none() && self.profile_dialog.is_some() {
+            self.profile_dialog_ui(ctx);
+            return;
+        }
         let Some(question) = &self.question else {
             return;
         };
@@ -935,6 +958,12 @@ impl App {
                 "Remove",
                 "Cancel",
             ),
+            Question::DeleteProfile(name) => (
+                "Delete profile",
+                format!("Delete the profile \"{name}\"?\n\nIts settings are lost."),
+                "Delete",
+                "Cancel",
+            ),
         };
         let mut answer = None;
         widgets::dialog(ctx, title, |ui| {
@@ -983,7 +1012,99 @@ impl App {
                 self.send(Request::Mixer { command: MixerCommand::RemoveBus { id } });
                 self.edited.clear();
             }
+            (Question::DeleteProfile(name), true) => {
+                self.send(Request::Mixer { command: MixerCommand::DeleteProfile { name } });
+            }
             _ => {}
+        }
+    }
+}
+
+/// The profiles dialog's own state: the new profile being named.
+#[derive(Default)]
+struct ProfileDialog {
+    name: String,
+    from_defaults: bool,
+}
+
+impl App {
+    /// The profiles: switch to one, delete one, or make a new one.
+    fn profile_dialog_ui(&mut self, ctx: &egui::Context) {
+        let (active, profiles) = {
+            let s = lock(&self.shared);
+            (s.snapshot.profile.clone(), s.snapshot.profiles.clone())
+        };
+        let mut close = false;
+        let mut send = None;
+        let mut delete = None;
+        let Some(dialog) = &mut self.profile_dialog else {
+            return;
+        };
+        widgets::dialog(ctx, "Profiles", |ui| {
+            ui.label(
+                RichText::new(
+                    "A profile holds the settings of every strip and bus. \
+                     Switching saves the current settings to the active profile, then takes up the other's.",
+                )
+                .small()
+                .color(Color32::GRAY),
+            );
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                for name in &profiles {
+                    ui.horizontal(|ui| {
+                        let is_active = *name == active;
+                        let text = if is_active { RichText::new(name).strong() } else { RichText::new(name) };
+                        ui.label(text);
+                        if is_active {
+                            ui.label(RichText::new("active").small().color(OK_COLOR));
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add_enabled(!is_active, egui::Button::new("Delete").small()).clicked() {
+                                delete = Some(name.clone());
+                            }
+                            if ui.add_enabled(!is_active, egui::Button::new("Switch").small()).clicked() {
+                                send = Some(MixerCommand::SwitchProfile { name: name.clone() });
+                            }
+                        });
+                    });
+                }
+            });
+            ui.separator();
+            ui.label(RichText::new("New profile").strong());
+            let response = ui.add(egui::TextEdit::singleline(&mut dialog.name).hint_text("Name").desired_width(300.0));
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut dialog.from_defaults, false, "From the current settings");
+                ui.radio_value(&mut dialog.from_defaults, true, "From the defaults");
+            });
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                let can_create = !dialog.name.trim().is_empty();
+                if ui.add_enabled(can_create, egui::Button::new("Create and switch")).clicked() || (enter && can_create)
+                {
+                    send = Some(MixerCommand::CreateProfile {
+                        name: dialog.name.trim().to_string(),
+                        from_defaults: dialog.from_defaults,
+                    });
+                    dialog.name.clear();
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if let Some(command) = send {
+            // Every strip and bus may change: the mixer's values win.
+            self.edited.clear();
+            self.send(Request::Mixer { command });
+        }
+        if let Some(name) = delete {
+            self.question = Some(Question::DeleteProfile(name));
+        }
+        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.profile_dialog = None;
         }
     }
 }
@@ -1058,6 +1179,7 @@ mod tests {
                 new_cable_name: String::new(),
                 new_cable_kind: "loopback".into(),
                 renaming: None,
+                profile_dialog: None,
                 editing_label: None,
                 _tray: None,
             };
@@ -1087,6 +1209,7 @@ mod tests {
             let _ = self.ctx.run(raw, |ctx| {
                 app.refresh();
                 egui::CentralPanel::default().show(ctx, |ui| app.mixer_panel(ui));
+                app.dialogs(ctx);
             });
         }
 
@@ -1135,6 +1258,28 @@ mod tests {
         }
         assert!(!h.focused(), "Enter ends the edit");
         assert_eq!(h.snapshot.strips[0].params.gain_db, -6.0, "the mixer got the level");
+    }
+
+    #[test]
+    fn the_profile_dialog_lists_profiles_and_creates_one() {
+        let mut h = Harness::new();
+        h.snapshot.profile = "Default".into();
+        h.snapshot.profiles = vec!["Default".into(), "Gaming".into()];
+        h.app.profile_dialog = Some(ProfileDialog { name: "Streaming".into(), from_defaults: true });
+        h.frame(vec![]);
+        h.frame(vec![]);
+        // Enter in the name field creates the profile.
+        let field = h.find_editable(200..700, 100..600);
+        eprintln!("name field at {field:?}");
+        h.frame(vec![key(egui::Key::Enter, true)]);
+        h.frame(vec![]);
+        assert!(
+            h.sent.iter().any(|r| matches!(r, Request::Mixer { command: MixerCommand::CreateProfile { name, from_defaults: true } } if name == "Streaming")),
+            "{:?}",
+            h.sent
+        );
+        h.frame(vec![key(egui::Key::Escape, true)]);
+        assert!(h.app.profile_dialog.is_none(), "Escape closes it");
     }
 
     #[test]

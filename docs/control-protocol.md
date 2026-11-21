@@ -108,6 +108,12 @@ The window uses `{"op": "mixer", "command": {...}}` for everything it changes. I
 
 The strip then hears the bus as it left the bus, 1 ms later, with no virtual device in between. Lemon Mix refuses a change that would let a bus hear itself, and turns off the strip's send to the bus it takes.
 
+Profiles are managed with `create_profile` (`name`, and `from_defaults` to start from a new configuration's settings rather than the current ones; it switches to the new profile), `switch_profile` (`name`) and `delete_profile` (`name`, not the active one):
+
+```json
+{ "op": "mixer", "command": { "cmd": "switch_profile", "name": "Gaming" } }
+```
+
 A strip can also capture an application, named by its program's file name; the snapshot's `apps` lists the applications with sound:
 
 ```json
@@ -139,6 +145,7 @@ The fields a controller usually needs (the full set is `Snapshot` in `app/src/pr
 - `routes` lists the IDs of the buses a strip sends to.
 - `port` is present only for hardware strips and buses. `state` is `off`, `opening`, `running` or `failed`, or `bus` for a strip fed from a bus; in that case `device_name` names the bus. A strip capturing an application is `running` while it captures, with the application's name in `device_name`, and `failed` while it waits for the application to start.
 - `apps` lists the applications with sound: `{ "exe": "Spotify.exe", "name": "Spotify", "active": true }`, where `active` means playing now.
+- `profile` is the active profile and `profiles` every profile, in alphabetical order.
 
 ## From the command line
 
@@ -151,6 +158,7 @@ The fields a controller usually needs (the full set is `Snapshot` in `app/src/pr
 | `adjust Mic -3` | `control` `adjust_gain` |
 | `gain Mic -12` | `control` `gain` |
 | `status` | `status`, shown as a table with each strip's and bus's key |
+| `profile Gaming` | `mixer` `switch_profile` |
 | `watch meters` | `subscribe`, printing each event |
 | `json '{"op":"status"}'` | any request as JSON |
 

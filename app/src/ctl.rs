@@ -5,7 +5,7 @@
 use std::io::{BufReader, Write};
 
 use crate::pipe_client::{CONTROL_PIPE, call_pipe, open_pipe, read_line, send};
-use crate::protocol::{BusView, ControlAction, Request, Snapshot, StripView};
+use crate::protocol::{BusView, ControlAction, MixerCommand, Request, Snapshot, StripView};
 
 pub const USAGE: &str = "\
 Controls a running Lemon Mix.
@@ -19,6 +19,7 @@ Commands:
                                       Send a strip to a bus
   gain   <target> <dB>                Set a fader, -60 to 12 dB
   adjust <target> <dB>                Move a fader up (3) or down (-3)
+  profile <name>                      Switch to a profile
   watch  [meters]                     Print events as the mixer changes, until Ctrl+C
   json   <request>                    Send a request as JSON (see docs/control-protocol.md)
 
@@ -128,6 +129,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             [word] if word.eq_ignore_ascii_case("meters") => Ok(Command::Watch { meters: true }),
             _ => Err("Expected watch or watch meters.".into()),
         },
+        "profile" => {
+            arity(1, usize::MAX)?;
+            Ok(Command::Send(Request::Mixer { command: MixerCommand::SwitchProfile { name: rest.join(" ") } }))
+        }
         "json" => {
             arity(1, usize::MAX)?;
             let text = rest.join(" ");
@@ -171,6 +176,9 @@ pub fn format_status(snapshot: &Snapshot) -> String {
         .max()
         .unwrap_or(4)
         .clamp(4, 24);
+    if !snapshot.profile.is_empty() {
+        text.push_str(&format!("Profile: {}\n", snapshot.profile));
+    }
     text.push_str("INPUTS\n");
     text.push_str(&format!(
         "  {:<5} {:<name_width$} {:>9}  {:<14} {:<16} KEY\n",
@@ -246,6 +254,10 @@ mod tests {
         assert_eq!(action("adjust Mic +3dB"), ControlAction::AdjustGain { target: "Mic".into(), db: 3.0 });
         assert_eq!(parse(&args("status")), Ok(Command::Status));
         assert_eq!(parse(&args("watch meters")), Ok(Command::Watch { meters: true }));
+        assert_eq!(
+            parse(&args("profile Gaming night")),
+            Ok(Command::Send(Request::Mixer { command: MixerCommand::SwitchProfile { name: "Gaming night".into() } }))
+        );
         assert_eq!(parse(&[]), Ok(Command::Help));
         assert_eq!(parse(&["json".into(), "{\"op\":\"status\"}".into()]), Ok(Command::Send(Request::Status)));
         for bad in
