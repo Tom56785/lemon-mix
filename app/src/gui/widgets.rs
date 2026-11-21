@@ -30,9 +30,16 @@ pub fn status_line(ui: &mut egui::Ui, tone: Tone, text: &str, link: Option<&str>
     clicked
 }
 
-/// A strip's or bus's frame.
-pub fn strip_frame(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::group(ui.style()).fill(Color32::from_gray(32)).inner_margin(egui::Margin::same(6)).show(ui, content);
+/// A strip's or bus's frame, its border in `highlight` when given: the colour
+/// of its mute or solo button while that is on.
+pub fn strip_frame(ui: &mut egui::Ui, highlight: Option<Color32>, content: impl FnOnce(&mut egui::Ui)) {
+    // Every frame has a border of the same width, so lighting one up moves nothing.
+    let color = highlight.unwrap_or(ui.visuals().widgets.noninteractive.bg_stroke.color);
+    egui::Frame::group(ui.style())
+        .fill(Color32::from_gray(32))
+        .inner_margin(egui::Margin::same(6))
+        .stroke(Stroke::new(2.0_f32, color))
+        .show(ui, content);
 }
 
 /// The column after the last strip or bus, with a button that adds one.
@@ -540,7 +547,7 @@ mod editing_tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                     ui.horizontal_top(|ui| {
-                        strip_frame(ui, |ui| {
+                        strip_frame(ui, None, |ui| {
                             ui.vertical(|ui| {
                                 ui.set_width(STRIP_WIDTH);
                                 changed |= fader(ui, "H1", gain, [0.0; 2], 1.0);

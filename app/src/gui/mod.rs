@@ -490,7 +490,16 @@ impl App {
             ui.label(RichText::new("INPUTS").small().strong().color(Color32::GRAY));
             ui.horizontal_top(|ui| {
                 for index in 0..self.strips.len() {
-                    widgets::strip_frame(ui, |ui| self.strip_ui(ui, index));
+                    // Muted wins over soloed: a muted strip is silent either way.
+                    let p = &self.strips[index].params;
+                    let highlight = if p.mute {
+                        Some(ERROR_COLOR)
+                    } else if p.solo {
+                        Some(PENDING_COLOR)
+                    } else {
+                        None
+                    };
+                    widgets::strip_frame(ui, highlight, |ui| self.strip_ui(ui, index));
                 }
                 if widgets::add_column(ui, "+ Input", "Add a hardware input strip") {
                     self.send(Request::Mixer { command: MixerCommand::AddStrip });
@@ -501,7 +510,8 @@ impl App {
             ui.label(RichText::new("OUTPUTS").small().strong().color(Color32::GRAY));
             ui.horizontal_top(|ui| {
                 for index in 0..self.buses.len() {
-                    widgets::strip_frame(ui, |ui| self.bus_ui(ui, index));
+                    let highlight = self.buses[index].params.mute.then_some(ERROR_COLOR);
+                    widgets::strip_frame(ui, highlight, |ui| self.bus_ui(ui, index));
                 }
                 if widgets::add_column(ui, "+ Output", "Add a hardware output bus") {
                     self.send(Request::Mixer { command: MixerCommand::AddBus });
