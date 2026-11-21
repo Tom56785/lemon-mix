@@ -193,6 +193,19 @@ Lemon Mix is written in Rust, as a Cargo workspace.
 | `streamdeck` | The Stream Deck plugin (TypeScript); see its [README](streamdeck/README.md) |
 | `docs` | The control protocol for controllers |
 
+## Releasing
+
+Releases are made by the **Release** workflow on GitHub (**Actions > Release > Run workflow**, on `main`):
+
+- **Version:** by default it takes the latest `vX.Y.Z` tag and bumps the part you choose (patch, minor or major). You can instead give an exact version, such as `1.0.0`. With no tags yet, a patch bump makes `0.0.1`, so give the first version you want explicitly. A version that exists or is lower than the latest is refused.
+- **Injection:** `scripts\set-version.ps1` writes the version into the workspace `Cargo.toml` (and `Cargo.lock`) and into the Stream Deck plugin's `package.json`, `package-lock.json` and `manifest.json` (as `X.Y.Z.0`). This happens on the runner only, so nothing is committed; the release is the tag on the commit that was built.
+- **Checks:** it runs the tests and the self-test, and checks that `LemonMix.exe --version` and both executables' Windows file properties show the new version. It tests, validates and packs the plugin.
+- **Release:** it tags the commit `vX.Y.Z` and publishes a GitHub release with generated notes and two files:
+  - `lemonmix-vX.Y.Z-windows-x64.zip`: `LemonMix.exe`, `LemonMixCtl.exe`, the README, the licences and the control protocol.
+  - `lemonmix-streamdeck-vX.Y.Z.streamDeckPlugin`: the Stream Deck plugin, installed by double-clicking it.
+
+Between releases the source says `0.1.0-dev`, and builds made from it show that version. `build.rs` puts whatever version Cargo has into each executable's file properties (**Properties > Details** in Explorer), and marks a version with a suffix as a pre-release. To try a version locally, run `powershell -ExecutionPolicy Bypass -File scripts\set-version.ps1 1.2.3`, then put back `0.1.0-dev` the same way.
+
 ## Project status
 
 Lemon Mix is experimental. Its USB descriptors, USB/IP protocol handling, mixer, resampling under simulated clock drift and settings are covered by automated tests; real-world behaviour depends on the system, the USB/IP transport and the devices. Test it before relying on it live.

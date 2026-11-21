@@ -23,17 +23,21 @@ const ICON_SIZES: [u32; 5] = [256, 64, 48, 32, 16];
 const RT_ICON: u32 = 3;
 const RT_GROUP_ICON: u32 = 14;
 const RT_MANIFEST: u32 = 24;
+const RT_VERSION: u32 = 16;
 const LANG_NEUTRAL: u32 = 0;
 const LANG_EN_US: u32 = 0x0409;
 
 /// The icon group the GUI loads with LoadImageW(instance, MAKEINTRESOURCE(1)).
 const ICON_GROUP_ID: u32 = 1;
 const MANIFEST_ID: u32 = 1; // CREATEPROCESS_MANIFEST_RESOURCE_ID
+const VERSION_ID: u32 = 1; // VS_VERSION_INFO
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/icon.rs");
     println!("cargo:rerun-if-changed={MANIFEST}");
+    // The version is the workspace's, which a release sets.
+    println!("cargo:rerun-if-changed=../Cargo.toml");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -57,6 +61,8 @@ fn main() {
     resources.push(Resource { kind: RT_GROUP_ICON, id: ICON_GROUP_ID, lang: LANG_NEUTRAL, data: group });
     let manifest = fs::read(MANIFEST).unwrap_or_else(|err| panic!("read {MANIFEST}: {err}"));
     resources.push(Resource { kind: RT_MANIFEST, id: MANIFEST_ID, lang: LANG_EN_US, data: manifest });
+    let version = env::var("CARGO_PKG_VERSION").expect("Cargo sets the version");
+    resources.push(Resource { kind: RT_VERSION, id: VERSION_ID, lang: LANG_EN_US, data: version_info(&version) });
 
     let object = coff_object(&resources);
     let path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("resources.o");
@@ -197,4 +203,86 @@ fn coff_object(resources: &[Resource]) -> Vec<u8> {
     object.push(0); // auxiliary symbols
     object.extend_from_slice(&4u32.to_le_bytes()); // empty string table
     object
+}
+
+/// The numbers of a version such as `1.2.3` or `1.2.3-dev`, for the fixed
+/// part of the version resource, which holds four numbers.
+fn version_numbers(version: &str) -> [u16; 4] {
+    let release = version.split(['-', '+']).next().unwrap_or_default();
+    let mut numbers = [0u16; 4];
+    for (slot, part) in numbers.iter_mut().zip(release.split('.')) {
+        *slot = part.parse().unwrap_or(0);
+    }
+    numbers
+}
+
+/// The version resource (VS_VERSIONINFO) that Windows shows in a file's
+/// properties: the version as numbers and as text, and the product's name.
+fn version_info(version: &str) -> Vec<u8> {
+    let [major, minor, patch, build] = version_numbers(version).map(u32::from);
+    let prerelease = version.contains('-');
+    let mut fixed = Vec::new();
+    for value in [
+        0xFEEF_04BD,                      // signature
+        0x0001_0000,                      // structure version
+        (major << 16) | minor,            // file version
+        (patch << 16) | build,            //
+        (major << 16) | minor,            // product version
+        (patch << 16) | build,            //
+        0x3F,                             // flags that are valid
+        if prerelease { 0x2 } else { 0 }, // VS_FF_PRERELEASE
+        0x0004_0004,                      // VOS_NT_WINDOWS32
+        0x1,                              // VFT_APP
+        0,                                // subtype
+        0,                                // date
+        0,                                //
+    ] {
+        fixed.extend_from_slice(&u32::to_le_bytes(value));
+    }
+    let strings: Vec<Vec<u8>> = [
+        ("CompanyName", "Tom Albans"),
+        ("FileDescription", "Lemon Mix"),
+        ("FileVersion", version),
+        ("LegalCopyright", "Copyright (c) 2026 Tom Albans. MIT licence."),
+        ("ProductName", "Lemon Mix"),
+        ("ProductVersion", version),
+    ]
+    .iter()
+    .map(|(key, value)| {
+        let text = utf16z(value);
+        version_block(key, 1, (text.len() / 2) as u16, &text, &[])
+    })
+    .collect();
+    // US English, Unicode.
+    let table = version_block("040904B0", 1, 0, &[], &strings);
+    let string_info = version_block("StringFileInfo", 1, 0, &[], &[table]);
+    let translation = [0x0409u16, 1200].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+    let var = version_block("Translation", 0, translation.len() as u16, &translation, &[]);
+    let var_info = version_block("VarFileInfo", 1, 0, &[], &[var]);
+    version_block("VS_VERSION_INFO", 0, fixed.len() as u16, &fixed, &[string_info, var_info])
+}
+
+/// One block of a version resource: its length, its value's length, its
+/// type (1 for text), its key, its value and its children, each starting on
+/// a 32-bit boundary.
+fn version_block(key: &str, kind: u16, value_length: u16, value: &[u8], children: &[Vec<u8>]) -> Vec<u8> {
+    let mut block = vec![0u8; 6];
+    block[2..4].copy_from_slice(&value_length.to_le_bytes());
+    block[4..6].copy_from_slice(&kind.to_le_bytes());
+    block.extend_from_slice(&utf16z(key));
+    let align = |block: &mut Vec<u8>| block.resize(block.len().next_multiple_of(4), 0);
+    align(&mut block);
+    block.extend_from_slice(value);
+    for child in children {
+        align(&mut block);
+        block.extend_from_slice(child);
+    }
+    let length = block.len() as u16;
+    block[0..2].copy_from_slice(&length.to_le_bytes());
+    block
+}
+
+/// Text as UTF-16, with its terminating zero.
+fn utf16z(text: &str) -> Vec<u8> {
+    text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
 }

@@ -1,0 +1,171 @@
+# Releases a new version from main. The version comes from the latest vX.Y.Z
+# tag, bumped by the chosen part, or is given exactly. scripts/set-version.ps1
+# writes it into Cargo.toml and the Stream Deck plugin on the runner only, so
+# nothing is committed: the release is a tag on the main commit that was
+# built. The executables report the version (--version, the log, the window)
+# and carry it in their Windows file properties.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Part of the version to increase (ignored when a version is given)
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: Exact version to release instead, for example 1.2.0 (optional)
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # all tags, to find the latest version
+
+      - name: Choose the version
+        id: version
+        shell: bash
+        env:
+          BUMP: ${{ inputs.bump }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Releases are made from main, not $GITHUB_REF_NAME."
+            exit 1
+          fi
+
+          latest=$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+          current=${latest#v}
+          current=${current:-0.0.0}
+
+          requested=$(printf '%s' "$REQUESTED" | tr -d '[:space:]')
+          if [ -n "$requested" ]; then
+            version=${requested#v}
+            if ! [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::error::'$requested' is not a version of the form MAJOR.MINOR.PATCH."
+              exit 1
+            fi
+          else
+            IFS=. read -r major minor patch <<< "$current"
+            case "$BUMP" in
+              major) version="$((major + 1)).0.0" ;;
+              minor) version="$major.$((minor + 1)).0" ;;
+              patch) version="$major.$minor.$((patch + 1))" ;;
+              *) echo "::error::Unknown bump '$BUMP'."; exit 1 ;;
+            esac
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+            echo "::error::Tag v$version already exists."
+            exit 1
+          fi
+          if [ -n "$latest" ] && [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n 1)" != "$version" ]; then
+            echo "::error::Version $version is lower than the latest release, $current."
+            exit 1
+          fi
+
+          echo "::notice::Releasing v$version (previous release: ${latest:-none})"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: streamdeck/package-lock.json
+
+      - name: Set the version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/set-version.ps1 $env:VERSION
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --release --workspace --locked
+
+      - name: Check the executables
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          target/release/LemonMix.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "The self-test failed." }
+          # Piped, so the output of this Windows program reaches the log.
+          $reported = target/release/LemonMix.exe --version | Out-String
+          if ($reported -notmatch [regex]::Escape("Lemon Mix $env:VERSION (")) {
+            throw "LemonMix.exe reports '$($reported.Trim())', not version $env:VERSION."
+          }
+          foreach ($exe in 'LemonMix.exe', 'LemonMixCtl.exe') {
+            $info = (Get-Item "target/release/$exe").VersionInfo
+            if ($info.ProductVersion -ne $env:VERSION -or $info.FileVersion -ne $env:VERSION -or $info.IsPreRelease) {
+              throw "$exe carries version '$($info.ProductVersion)' in its file properties, not $env:VERSION."
+            }
+          }
+          Write-Host "Both executables are version $env:VERSION."
+
+      - name: Build the Stream Deck plugin
+        working-directory: streamdeck
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw "The plugin's tests failed." }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "The plugin did not build." }
+          npm run validate
+          if ($LASTEXITCODE -ne 0) { throw "The plugin did not validate." }
+          npx streamdeck pack com.lemonmix.mixer.sdPlugin --output dist --force
+          if ($LASTEXITCODE -ne 0) { throw "The plugin could not be packed." }
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $name = "lemonmix-v$env:VERSION-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/LemonMix.exe, target/release/LemonMixCtl.exe, README.md, LICENSE $name
+          Copy-Item LICENSES $name -Recurse
+          Copy-Item docs $name -Recurse
+          Compress-Archive $name "$name.zip"
+          $plugin = "lemonmix-streamdeck-v$env:VERSION.streamDeckPlugin"
+          Copy-Item streamdeck/dist/com.lemonmix.mixer.streamDeckPlugin $plugin
+          "archive=$name.zip" >> $env:GITHUB_OUTPUT
+          "plugin=$plugin" >> $env:GITHUB_OUTPUT
+
+      - name: Tag and publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          PLUGIN: ${{ steps.package.outputs.plugin }}
+        run: |
+          gh release create "v$VERSION" "$ARCHIVE" "$PLUGIN" \
+            --target "$GITHUB_SHA" \
+            --title "Lemon Mix v$VERSION" \
+            --generate-notes
