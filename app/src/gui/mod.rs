@@ -522,9 +522,33 @@ impl App {
         if let Some((editing, text)) = &mut self.editing_label
             && editing == id
         {
-            let response = ui.add(egui::TextEdit::singleline(text).desired_width(widgets::STRIP_WIDTH - 8.0));
-            response.request_focus();
-            if response.lost_focus() {
+            let edit_id = egui::Id::new((id, "label"));
+            let response =
+                ui.add(egui::TextEdit::singleline(text).id(edit_id).desired_width(widgets::STRIP_WIDTH - 8.0));
+            // Focus once, when editing starts; asking every frame would take
+            // the keyboard back from wherever the user moves it.
+            if ui.data(|d| d.get_temp::<bool>(edit_id).is_none()) {
+                ui.data_mut(|d| d.insert_temp(edit_id, true));
+                response.request_focus();
+                // With the whole name selected, typing replaces it.
+                let mut state = egui::text_edit::TextEditState::load(ui.ctx(), edit_id).unwrap_or_default();
+                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(text.chars().count()),
+                )));
+                state.store(ui.ctx(), edit_id);
+            }
+            let (enter, escape, pressed_elsewhere) = ui.input(|i| {
+                let elsewhere =
+                    i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pos| !response.rect.contains(pos));
+                (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape), elsewhere)
+            });
+            if escape {
+                ui.data_mut(|d| d.remove::<bool>(edit_id));
+                self.editing_label = None;
+            } else if enter || pressed_elsewhere || response.lost_focus() {
+                ui.data_mut(|d| d.remove::<bool>(edit_id));
+                ui.memory_mut(|m| m.surrender_focus(edit_id));
                 let (id, text) = self.editing_label.take().unwrap();
                 self.mixer(&id, MixerCommand::Label { id: id.clone(), label: text.clone() });
                 if let Some(s) = self.strips.iter_mut().find(|s| s.id == id) {
@@ -635,11 +659,11 @@ impl App {
                     };
             });
             ui.add_space(2.0);
-            changed |= widgets::knob_row(ui, "Bass", &mut params.eq[0], -12.0..=12.0, "dB");
-            changed |= widgets::knob_row(ui, "Mid", &mut params.eq[1], -12.0..=12.0, "dB");
-            changed |= widgets::knob_row(ui, "Treble", &mut params.eq[2], -12.0..=12.0, "dB");
-            changed |= widgets::knob_row(ui, "Gate", &mut params.gate, 0.0..=10.0, "");
-            changed |= widgets::knob_row(ui, "Comp", &mut params.comp, 0.0..=10.0, "");
+            changed |= widgets::knob_row(ui, &strip.id, "Bass", &mut params.eq[0], -12.0..=12.0, "dB");
+            changed |= widgets::knob_row(ui, &strip.id, "Mid", &mut params.eq[1], -12.0..=12.0, "dB");
+            changed |= widgets::knob_row(ui, &strip.id, "Treble", &mut params.eq[2], -12.0..=12.0, "dB");
+            changed |= widgets::knob_row(ui, &strip.id, "Gate", &mut params.gate, 0.0..=10.0, "");
+            changed |= widgets::knob_row(ui, &strip.id, "Comp", &mut params.comp, 0.0..=10.0, "");
             if let Some(port) = &strip.port {
                 widgets::port_status(ui, port);
             }
@@ -697,7 +721,7 @@ impl App {
                 changed = true;
             }
             if let Some(ceiling) = &mut params.limiter {
-                changed |= widgets::knob_row(ui, "Ceiling", ceiling, -20.0..=0.0, "dB");
+                changed |= widgets::knob_row(ui, &bus.id, "Ceiling", ceiling, -20.0..=0.0, "dB");
             }
             if let Some(port) = &bus.port {
                 widgets::port_status(ui, port);
@@ -943,5 +967,212 @@ fn kind_label(kind: &str) -> &'static str {
         "input" => "Input (playback device)",
         "output" => "Output (recording device)",
         _ => "Loopback (both)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{PortView, Snapshot, StripParams};
+
+    fn key(key: egui::Key, pressed: bool) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: Default::default() }
+    }
+
+    fn click(pos: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    /// The window as it runs: the mixer's state arrives every frame, and the
+    /// mixer applies what the window sends.
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        requests: std::sync::mpsc::Receiver<Request>,
+        snapshot: Snapshot,
+        time: f64,
+        /// Every request the window sent.
+        sent: Vec<Request>,
+    }
+
+    impl Harness {
+        fn new() -> Harness {
+            let shared = new_shared(Mode::OnDemand);
+            let (link, requests) = Link::detached();
+            let strip = StripView {
+                id: "H1".into(),
+                key: "k1".into(),
+                label: "Hardware 1".into(),
+                params: StripParams::default(),
+                routes: vec!["A1".into()],
+                meter: Default::default(),
+                port: Some(PortView::default()),
+            };
+            let snapshot = Snapshot { strips: vec![strip], ..Default::default() };
+            let app = App {
+                shared,
+                link,
+                generation: u64::MAX,
+                strips: Vec::new(),
+                buses: Vec::new(),
+                cables: Vec::new(),
+                capture_devices: Vec::new(),
+                render_devices: Vec::new(),
+                edited: HashMap::new(),
+                meter_display: HashMap::new(),
+                last_frame: Instant::now(),
+                question: None,
+                new_cable_name: String::new(),
+                new_cable_kind: "loopback".into(),
+                renaming: None,
+                editing_label: None,
+                _tray: None,
+            };
+            Harness { ctx: egui::Context::default(), app, requests, snapshot, time: 0.0, sent: Vec::new() }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            for request in self.requests.try_iter() {
+                if let Request::Mixer { command: MixerCommand::Strip { params, .. } } = &request {
+                    self.snapshot.strips[0].params = params.clone();
+                }
+                self.sent.push(request);
+            }
+            {
+                let mut s = lock(&self.app.shared);
+                s.snapshot = self.snapshot.clone();
+                s.generation += 1;
+            }
+            let raw = egui::RawInput {
+                events,
+                time: Some(self.time),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, 700.0))),
+                ..Default::default()
+            };
+            self.time += 0.1;
+            let app = &mut self.app;
+            let _ = self.ctx.run(raw, |ctx| {
+                app.refresh();
+                egui::CentralPanel::default().show(ctx, |ui| app.mixer_panel(ui));
+            });
+        }
+
+        fn focused(&self) -> bool {
+            self.ctx.memory(|m| m.focused().is_some())
+        }
+
+        /// Clicks each point of a grid until one starts editing a value.
+        fn find_editable(&mut self, xs: std::ops::Range<i32>, ys: std::ops::Range<i32>) -> egui::Pos2 {
+            for y in ys.step_by(3) {
+                for x in xs.clone().step_by(5) {
+                    let pos = egui::Pos2::new(x as f32, y as f32);
+                    self.frame(click(pos));
+                    self.frame(vec![]);
+                    if self.focused() {
+                        return pos;
+                    }
+                }
+            }
+            panic!("nothing became editable");
+        }
+    }
+
+    #[test]
+    fn a_typed_level_is_applied_with_enter() {
+        let mut h = Harness::new();
+        h.frame(vec![]);
+        h.frame(vec![]);
+        h.find_editable(5..80, 230..300);
+        h.frame(vec![egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        }]);
+        // The pointer rests on the box long enough for its tooltip.
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+        h.frame(vec![egui::Event::Text("-6".into())]);
+        h.frame(vec![key(egui::Key::Enter, true)]);
+        h.frame(vec![key(egui::Key::Enter, false)]);
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        assert!(!h.focused(), "Enter ends the edit");
+        assert_eq!(h.snapshot.strips[0].params.gain_db, -6.0, "the mixer got the level");
+    }
+
+    #[test]
+    fn escape_keeps_the_old_level() {
+        let mut h = Harness::new();
+        h.frame(vec![]);
+        h.find_editable(5..80, 230..300);
+        h.frame(vec![egui::Event::Text("9".into())]);
+        h.frame(vec![key(egui::Key::Escape, true)]);
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(!h.focused());
+        assert_eq!(h.snapshot.strips[0].params.gain_db, 0.0);
+    }
+
+    #[test]
+    fn a_new_name_is_kept_by_clicking_away() {
+        let mut h = Harness::new();
+        h.frame(vec![]);
+        // As after double-clicking the name.
+        h.app.editing_label = Some(("H1".into(), "Hardware 1".into()));
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(h.focused(), "the name field takes the keyboard");
+        h.frame(vec![egui::Event::Text("Mic".into())]);
+        h.frame(click(egui::Pos2::new(600.0, 650.0)));
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        assert!(!h.focused(), "clicking away ends the edit");
+        assert!(h.app.editing_label.is_none());
+        h.frame(vec![]);
+        let sent = &h.sent;
+        assert!(
+            sent.iter()
+                .any(|r| matches!(r, Request::Mixer { command: MixerCommand::Label { label, .. } } if label == "Mic")),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_typed_knob_value_is_applied_by_clicking_away() {
+        let mut h = Harness::new();
+        h.frame(vec![]);
+        h.frame(vec![]);
+        // The knob boxes are at the right of the strip, below the fader.
+        let at = h.find_editable(95..140, 330..420);
+        eprintln!("editing at {at:?}");
+        h.frame(vec![egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        }]);
+        h.frame(vec![egui::Event::Text("4".into())]);
+        for _ in 0..10 {
+            h.frame(vec![]);
+        }
+        h.frame(click(egui::Pos2::new(600.0, 650.0)));
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        assert!(!h.focused(), "clicking away ends the edit");
+        let p = &h.snapshot.strips[0].params;
+        assert!(p.eq.contains(&4.0) || p.gate == 4.0 || p.comp == 4.0, "{p:?}");
     }
 }

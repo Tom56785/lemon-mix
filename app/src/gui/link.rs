@@ -136,6 +136,13 @@ impl Link {
         Link { jobs }
     }
 
+    /// A link whose requests go to the returned receiver, for tests.
+    #[cfg(test)]
+    pub fn detached() -> (Link, std::sync::mpsc::Receiver<Request>) {
+        let (jobs, receiver) = channel();
+        (Link { jobs }, receiver)
+    }
+
     /// Queues a request; its error, if any, is shown to the user.
     pub fn send(&self, request: Request) {
         let _ = self.jobs.send(request);

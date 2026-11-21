@@ -134,17 +134,98 @@ pub fn fader(ui: &mut egui::Ui, id: &str, gain_db: &mut f32, peak: [f32; 2], red
         let _ = id;
         scale(ui);
     });
-    let typed = ui
-        .add(
-            egui::DragValue::new(gain_db)
-                .update_while_editing(false)
-                .range(MIN_DB..=12.0)
-                .speed(0.1)
-                .custom_formatter(|db, _| format_db(db as f32))
-                .custom_parser(parse_db),
-        )
-        .on_hover_text("Click to type a level in dB, or drag");
-    changed | typed.changed()
+    let typed = NumberBox {
+        id: egui::Id::new((id, "gain")),
+        width: 64.0,
+        range: MIN_DB..=12.0,
+        speed: 0.1,
+        format: &format_db,
+        edit_text: &|db| if db <= MIN_DB { "-inf".into() } else { format!("{db:.1}") },
+        parse: &parse_db,
+        hint: "Click to type a level in dB, or drag",
+    }
+    .show(ui, gain_db);
+    changed | typed
+}
+
+/// A value shown as text that can be typed over or dragged. Click it to type
+/// a value; Enter, clicking anywhere else, or leaving the field applies it,
+/// and Escape keeps the old one. Dragging moves it by `speed` a point.
+///
+/// The edit is kept in this widget's own state under a fixed ID, so it ends
+/// however the field loses the keyboard, rather than relying on the text
+/// field noticing.
+pub struct NumberBox<'a> {
+    pub id: egui::Id,
+    pub width: f32,
+    pub range: RangeInclusive<f32>,
+    pub speed: f32,
+    /// The value as shown.
+    pub format: &'a dyn Fn(f32) -> String,
+    /// The value as the field starts out when clicked.
+    pub edit_text: &'a dyn Fn(f32) -> String,
+    pub parse: &'a dyn Fn(&str) -> Option<f64>,
+    pub hint: &'a str,
+}
+
+impl NumberBox<'_> {
+    /// Returns whether the value changed.
+    pub fn show(self, ui: &mut egui::Ui, value: &mut f32) -> bool {
+        let size = Vec2::new(self.width, ui.spacing().interact_size.y);
+        let edit_id = self.id.with("edit");
+        let clamp = |v: f32| v.clamp(*self.range.start(), *self.range.end());
+        if let Some(mut text) = ui.data(|d| d.get_temp::<String>(self.id)) {
+            let response = ui.add_sized(
+                size,
+                egui::TextEdit::singleline(&mut text).id(edit_id).horizontal_align(egui::Align::Center),
+            );
+            let (enter, escape, pressed_elsewhere) = ui.input(|i| {
+                let pressed_elsewhere =
+                    i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pos| !response.rect.contains(pos));
+                (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape), pressed_elsewhere)
+            });
+            if enter || escape || pressed_elsewhere || response.lost_focus() {
+                ui.data_mut(|d| d.remove::<String>(self.id));
+                ui.memory_mut(|m| m.surrender_focus(edit_id));
+                let typed = if escape { None } else { (self.parse)(&text).map(|v| clamp(v as f32)) };
+                return match typed {
+                    Some(v) if v != *value => {
+                        *value = v;
+                        true
+                    }
+                    _ => false,
+                };
+            }
+            ui.data_mut(|d| d.insert_temp(self.id, text));
+            return false;
+        }
+        let response = ui
+            .add_sized(size, egui::Button::new((self.format)(*value)).sense(Sense::click_and_drag()))
+            .on_hover_text(self.hint);
+        if response.clicked() {
+            let text = (self.edit_text)(*value);
+            // Start with the whole value selected, so typing replaces it.
+            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), edit_id).unwrap_or_default();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(text.chars().count()),
+            )));
+            state.store(ui.ctx(), edit_id);
+            ui.data_mut(|d| d.insert_temp(self.id, text));
+            ui.memory_mut(|m| m.request_focus(edit_id));
+            ui.ctx().request_repaint();
+            return false;
+        }
+        if response.dragged() {
+            let delta = response.drag_delta();
+            let dragged = clamp(*value + (delta.x - delta.y) * self.speed);
+            if dragged != *value {
+                *value = dragged;
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// A fader level as shown: `-6.0 dB`, `+3.0 dB`, or `-inf dB` at the bottom.
@@ -261,7 +342,6 @@ fn scale(ui: &mut egui::Ui) {
 
 /// The balance control; double-click centres it.
 pub fn pan(ui: &mut egui::Ui, id: &str, pan: &mut f32) -> bool {
-    let _ = id;
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().slider_width = STRIP_WIDTH - 44.0;
@@ -273,20 +353,20 @@ pub fn pan(ui: &mut egui::Ui, id: &str, pan: &mut f32) -> bool {
             changed = true;
         }
         changed |= response.changed();
-        let mut percent = *pan as f64 * 100.0;
-        let typed = ui
-            .add_sized(
-                [36.0, 16.0],
-                egui::DragValue::new(&mut percent)
-                    .update_while_editing(false)
-                    .range(-100.0..=100.0)
-                    .speed(1.0)
-                    .custom_formatter(|p, _| format_pan(p))
-                    .custom_parser(parse_pan),
-            )
-            .on_hover_text("Click to type a balance: C, L40, R25");
-        if typed.changed() {
-            *pan = (percent / 100.0) as f32;
+        let mut percent = *pan * 100.0;
+        let typed = NumberBox {
+            id: egui::Id::new((id, "pan")),
+            width: 36.0,
+            range: -100.0..=100.0,
+            speed: 1.0,
+            format: &|p| format_pan(p as f64),
+            edit_text: &|p| format_pan(p as f64),
+            parse: &parse_pan,
+            hint: "Click to type a balance: C, L40, R25",
+        }
+        .show(ui, &mut percent);
+        if typed {
+            *pan = percent / 100.0;
             changed = true;
         }
     });
@@ -302,7 +382,15 @@ pub fn toggle(ui: &mut egui::Ui, text: &str, on: bool, color: Color32) -> egui::
 }
 
 /// A labelled small slider for a processing setting; double-click resets it.
-pub fn knob_row(ui: &mut egui::Ui, label: &str, value: &mut f32, range: RangeInclusive<f32>, unit: &str) -> bool {
+/// `id` is the strip's or bus's, to keep each row's typing apart.
+pub fn knob_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    value: &mut f32,
+    range: RangeInclusive<f32>,
+    unit: &str,
+) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.add_sized([38.0, 14.0], egui::Label::new(RichText::new(label).small()));
@@ -316,22 +404,22 @@ pub fn knob_row(ui: &mut egui::Ui, label: &str, value: &mut f32, range: RangeInc
         }
         changed |= response.changed();
         let decibels = !unit.is_empty();
-        let typed = ui
-            .add_sized(
-                [38.0, 16.0],
-                egui::DragValue::new(value)
-                    .update_while_editing(false)
-                    .range(range)
-                    .speed(0.1)
-                    .custom_formatter(move |v, _| if decibels { format!("{v:+.1}") } else { format!("{v:.1}") })
-                    .custom_parser(parse_number),
-            )
-            .on_hover_text(if decibels {
-                "Click to type a value in dB"
+        let format = move |v: f32| if decibels { format!("{v:+.1}") } else { format!("{v:.1}") };
+        changed |= NumberBox {
+            id: egui::Id::new((id, label)),
+            width: 38.0,
+            range,
+            speed: 0.1,
+            format: &format,
+            edit_text: &format,
+            parse: &parse_number,
+            hint: if decibels {
+                "Click to type a value in dB, or drag"
             } else {
                 "Click to type a value, 0 (off) to 10"
-            });
-        changed |= typed.changed();
+            },
+        }
+        .show(ui, value);
     });
     changed
 }
@@ -403,5 +491,109 @@ mod tests {
         assert_eq!(parse_pan("left"), None);
         assert_eq!([format_pan(0.2), format_pan(-40.0), format_pan(25.0)], ["C", "L40", "R25"]);
         assert_eq!(parse_number("4.5"), Some(4.5));
+    }
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use super::*;
+
+    fn run(ctx: &egui::Context, events: Vec<egui::Event>, gain: &mut f32) -> bool {
+        let raw = egui::RawInput {
+            events,
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            ..Default::default()
+        };
+        let mut changed = false;
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        strip_frame(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(STRIP_WIDTH);
+                                changed |= fader(ui, "H1", gain, [0.0; 2], 1.0);
+                            });
+                        });
+                    });
+                });
+            });
+        });
+        changed
+    }
+
+    #[test]
+    fn typing_a_level_applies_it() {
+        let ctx = egui::Context::default();
+        let mut gain = 0.0;
+        run(&ctx, vec![], &mut gain);
+        // The level box is under the fader: find it by scanning for where a click starts editing.
+        let mut found = None;
+        'scan: for y in (150..260).step_by(4) {
+            for x in (10..120).step_by(6) {
+                let pos = Pos2::new(x as f32, y as f32);
+                let click = vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    },
+                ];
+                let before = gain;
+                run(&ctx, click, &mut gain);
+                run(&ctx, vec![], &mut gain);
+                gain = before;
+                if ctx.memory(|m| m.focused().is_some()) {
+                    found = Some(pos);
+                    break 'scan;
+                }
+            }
+        }
+        let pos = found.expect("a click focuses the level box");
+        eprintln!("level box at {pos:?}");
+        run(
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+            }],
+            &mut gain,
+        );
+        run(&ctx, vec![egui::Event::Text("-6".into())], &mut gain);
+        let mut changed = false;
+        for events in [
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            vec![],
+            vec![],
+        ] {
+            changed |= run(&ctx, events, &mut gain);
+        }
+        assert!(ctx.memory(|m| m.focused().is_none()), "Enter ends the edit");
+        assert!(changed, "the change is reported");
+        assert_eq!(gain, -6.0);
     }
 }
