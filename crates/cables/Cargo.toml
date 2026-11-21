@@ -1,0 +1,16 @@
+[package]
+name = "cables"
+description = "Virtual audio cables exported as USB Audio Class 2.0 devices over USB/IP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+socket2.workspace = true
+
+[target."cfg(not(windows))".dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys.workspace = true

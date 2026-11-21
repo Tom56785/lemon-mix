@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/cables", "crates/engine", "crates/devices", "app"]
+default-members = ["crates/cables", "crates/engine", "crates/devices", "app"]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+cables = { path = "crates/cables" }
+engine = { path = "crates/engine" }
+devices = { path = "crates/devices" }
+socket2 = { version = "0.5", features = ["all"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_Networking_WinHttp", "Win32_Security_Cryptography", "Win32_Media", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_System_SystemInformation", "Win32_System_Time", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Services", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_Security_Authorization"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# The audio paths are tested for timing; keep them reasonably fast in tests.
+[profile.test]
+opt-level = 1
+
+# The self-contained windows-gnu toolchain ships no shlwapi import library,
+# which the crates.io webbrowser crate links; egui only uses it to open links.
+[patch.crates-io]
+webbrowser = { path = "vendor/webbrowser" }

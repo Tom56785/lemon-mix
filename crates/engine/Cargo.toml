@@ -1,0 +1,11 @@
+[package]
+name = "engine"
+description = "Lemon Mix's mixing engine: strips, buses, routing, gain ramps, DSP and meters on the USB bus frame clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cables.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }

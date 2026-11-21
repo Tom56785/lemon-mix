@@ -1,0 +1,13 @@
+[package]
+name = "webbrowser"
+# Stands in for the crates.io crate of this version, which egui-winit requires
+# for opening links. That crate links shlwapi, whose import library the
+# self-contained windows-gnu toolchain does not ship.
+version = "1.0.3"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Opens URLs in the default browser with ShellExecuteW (local stand-in for webbrowser)"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
