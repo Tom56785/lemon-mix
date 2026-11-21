@@ -184,4 +184,4 @@ Audio is processed locally and stays in memory. The USB/IP server listens only o
 
 ## Licence
 
-MIT; see [`LICENSE`](LICENSE). Third-party licences are listed in [`LICENSES`](LICENSES).
+MIT; see [`LICENSE`](LICENSE). Third-party licences are listed in [`LICENSES`](LICENSES/README.md); after changing dependencies, regenerate them with `powershell -ExecutionPolicy Bypass -File scripts\update-licenses.ps1`.
