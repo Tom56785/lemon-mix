@@ -49,6 +49,11 @@ pub struct Cli {
     #[arg(long, num_args = 2, value_names = ["PLAYBACK", "RECORDING"])]
     pub measure_latency: Option<Vec<String>>,
 
+    /// Control the running mixer, then exit: mute Mic, route Mic A2 on, adjust Mic -3, status, help
+    /// (LemonMixCtl.exe does the same in a terminal)
+    #[arg(long, num_args = 1.., allow_hyphen_values = true, value_name = "COMMAND")]
+    pub control: Option<Vec<String>>,
+
     /// Print version, then exit
     #[arg(long, short = 'V')]
     pub version: bool,

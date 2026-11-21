@@ -333,3 +333,41 @@ fn any_number_of_strips_and_buses() {
     assert!(meters.buses[90].take().peak[0] > 0.0);
     assert_eq!(meters.buses[89].take().peak, [0.0, 0.0]);
 }
+
+/// A strip fed from a bus hears that bus's output one frame later, after
+/// the bus's own fader, without a virtual cable in between.
+#[test]
+fn a_bus_feeds_a_strip_one_frame_later() {
+    let engine = Arc::new(Engine::new());
+    let output = Arc::new(TestOutput::default());
+    let tone: Frame = std::array::from_fn(|i| if i % 2 == 0 { 0.5 } else { 0.25 });
+    engine.set_topology(Topology {
+        strips: vec![
+            StripSpec {
+                source: StripSource::Hardware(Some(Arc::new(TestInput(tone)))),
+                params: StripParams::default(),
+                routes: vec![0],
+            },
+            // Bus 0 comes back in here, and goes on to bus 1.
+            StripSpec { source: StripSource::Bus(0), params: StripParams::default(), routes: vec![1] },
+        ],
+        buses: vec![
+            BusSpec { sink: BusSink::Hardware(None), params: BusParams { gain_db: -6.0, ..Default::default() } },
+            BusSpec {
+                sink: BusSink::Hardware(Some(Arc::clone(&output) as Arc<dyn OutputPort>)),
+                params: BusParams::default(),
+            },
+        ],
+    });
+    engine.process_until(900);
+    engine.process_until(902);
+    let frames = output.0.lock().unwrap().clone();
+    assert_eq!(frames.len(), 3);
+    assert!(frames[0].iter().all(|&s| s == 0.0), "nothing has left bus 0 yet");
+    let half = db_to_gain(-6.0);
+    for frame in &frames[1..] {
+        for pair in frame.as_chunks::<2>().0 {
+            assert!((pair[0] - 0.5 * half).abs() < 1e-6 && (pair[1] - 0.25 * half).abs() < 1e-6, "{pair:?}");
+        }
+    }
+}

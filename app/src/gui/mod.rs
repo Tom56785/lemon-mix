@@ -158,7 +158,6 @@ struct App {
     renaming: Option<(String, String)>,
     editing_label: Option<(String, String)>,
     _tray: Option<tray_icon::TrayIcon>,
-    tray_notice_shown: bool,
 }
 
 impl App {
@@ -192,7 +191,6 @@ impl App {
             renaming: None,
             editing_label: None,
             _tray: tray,
-            tray_notice_shown: false,
         };
         let (mode, state) = {
             let s = lock(&shared);
@@ -287,11 +285,11 @@ fn window_handle(cc: &eframe::CreationContext<'_>) -> Option<isize> {
     }
 }
 
-/// The notification area icon: double-click or Show brings the window back,
+/// The notification area icon: a click or Show brings the window back,
 /// Quit stops the mixer and exits.
 fn create_tray() -> Result<tray_icon::TrayIcon, String> {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use tray_icon::{Icon, MouseButton, TrayIconBuilder, TrayIconEvent};
+    use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     let menu = Menu::new();
     let show = MenuItem::new("Show Lemon Mix", true, None);
@@ -306,14 +304,16 @@ fn create_tray() -> Result<tray_icon::TrayIcon, String> {
             show_window();
         }
     }));
+    // A left click shows the window; the menu is on the right button.
     TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
-        if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
             show_window();
         }
     }));
     let icon = Icon::from_rgba(crate::icon::lemon_rgba(32), 32, 32).map_err(|e| e.to_string())?;
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
         .with_tooltip("Lemon Mix")
         .with_icon(icon)
         .build()
@@ -338,14 +338,6 @@ impl eframe::App for App {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             hide_window();
-            if !self.tray_notice_shown {
-                self.tray_notice_shown = true;
-                link::set_notice(
-                    &self.shared,
-                    Tone::Ok,
-                    "Lemon Mix keeps running in the notification area \u{00b7} use Quit to stop it",
-                );
-            }
         }
         if QUIT.load(Ordering::SeqCst) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -579,7 +571,17 @@ impl App {
                 self.question = Some(Question::RemoveStrip(strip.id.clone(), strip.label.clone()));
             }
             if let Some(port) = &strip.port {
-                if let Some((endpoint, exclusive)) = widgets::device_picker(ui, &strip.id, port, &self.capture_devices)
+                let buses: Vec<(String, String)> = self
+                    .bus_short_names()
+                    .into_iter()
+                    .zip(&self.buses)
+                    .map(|((_, short, label), bus)| {
+                        let name = if label == short { short } else { format!("{short} ({label})") };
+                        (format!("{}{}", crate::mixer::BUS_SOURCE, bus.key), name)
+                    })
+                    .collect();
+                if let Some((endpoint, exclusive)) =
+                    widgets::device_picker(ui, &strip.id, port, &self.capture_devices, &buses)
                 {
                     if let Some(p) = &mut self.strips[index].port {
                         (p.endpoint, p.exclusive) = (endpoint.clone(), exclusive);
@@ -664,7 +666,9 @@ impl App {
                 self.question = Some(Question::RemoveBus(bus.id.clone(), bus.label.clone()));
             }
             if let Some(port) = &bus.port {
-                if let Some((endpoint, exclusive)) = widgets::device_picker(ui, &bus.id, port, &self.render_devices) {
+                if let Some((endpoint, exclusive)) =
+                    widgets::device_picker(ui, &bus.id, port, &self.render_devices, &[])
+                {
                     if let Some(p) = &mut self.buses[index].port {
                         (p.endpoint, p.exclusive) = (endpoint.clone(), exclusive);
                     }

@@ -46,6 +46,11 @@ pub enum StripSource {
     Virtual { line: Arc<DelayLine>, playback_active: Arc<AtomicBool> },
     /// A physical capture device, or none chosen yet.
     Hardware(Option<Arc<dyn InputPort>>),
+    /// Another bus's output, by index, as it left that bus one frame
+    /// (1 ms) earlier: a bus fed back in without a virtual cable. The delay
+    /// keeps the order of processing simple; the host keeps routes from
+    /// making a loop.
+    Bus(usize),
 }
 
 /// Where a bus's mix goes.
@@ -121,6 +126,8 @@ struct BusState {
     limiter: Limiter,
     rms: RmsFollower,
     mix: Frame,
+    /// The last frame this bus put out, for strips fed from it.
+    out: Frame,
 }
 
 /// The most frames processed in one batch. After a longer stall the engine
@@ -225,6 +232,7 @@ impl Engine {
                     limiter,
                     rms: RmsFollower::default(),
                     mix: [0.0; FRAME_LEN],
+                    out: [0.0; FRAME_LEN],
                 }
             })
             .collect();
@@ -453,6 +461,10 @@ impl Core {
                     *frame = [0.0; FRAME_LEN];
                     false
                 }
+                StripSource::Bus(bus) => {
+                    *frame = buses.get(*bus).map_or([0.0; FRAME_LEN], |b| b.out);
+                    false
+                }
             };
             let last = strip.last;
             strip.last = [frame[FRAME_LEN - 2], frame[FRAME_LEN - 1]];
@@ -512,6 +524,7 @@ impl Core {
             for sample in mix.iter_mut() {
                 *sample = sample.clamp(-1.0, 1.0);
             }
+            bus.out = *mix;
             let (peak, rms) = bus.rms.measure(mix);
             if let Some(meter) = meters.buses.get(index) {
                 meter.record(peak, rms, reduction);

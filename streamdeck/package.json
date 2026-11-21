@@ -1,0 +1,28 @@
+{
+	"name": "lemon-mix-streamdeck",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Stream Deck plugin for Lemon Mix",
+	"license": "MIT",
+	"type": "module",
+	"scripts": {
+		"build": "node scripts/build.mjs",
+		"watch": "node scripts/build.mjs --watch",
+		"test": "tsc -p tsconfig.test.json && node --test \"build-test/test/*.test.js\"",
+		"typecheck": "tsc --noEmit",
+		"validate": "streamdeck validate com.lemonmix.mixer.sdPlugin",
+		"pack": "npm run build && streamdeck pack com.lemonmix.mixer.sdPlugin --output dist --force",
+		"link": "npm run build && streamdeck link com.lemonmix.mixer.sdPlugin",
+		"restart": "streamdeck restart com.lemonmix.mixer",
+		"icons": "node scripts/make-icons.mjs"
+	},
+	"dependencies": {
+		"@elgato/streamdeck": "3.0.4"
+	},
+	"devDependencies": {
+		"@elgato/cli": "1.10.4",
+		"@types/node": "24.19.2",
+		"esbuild": "0.28.2",
+		"typescript": "6.0.3"
+	}
+}

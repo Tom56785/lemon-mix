@@ -1,0 +1,55 @@
+name: Stream Deck plugin
+
+on:
+  push:
+    branches: [main]
+    paths: ["streamdeck/**", ".github/workflows/streamdeck.yml"]
+  pull_request:
+    paths: ["streamdeck/**", ".github/workflows/streamdeck.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: streamdeck-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: streamdeck
+
+jobs:
+  plugin:
+    # The connection tests use a Windows named pipe.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: streamdeck/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate
+        run: npm run validate
+
+      - name: Pack
+        run: npx streamdeck pack com.lemonmix.mixer.sdPlugin --output dist --force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: com.lemonmix.mixer.streamDeckPlugin
+          path: streamdeck/dist/*.streamDeckPlugin

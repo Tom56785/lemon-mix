@@ -392,6 +392,9 @@ pub fn ensure_config_file(logger: &Logger) {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedStrip {
     pub id: String,
+    /// What controllers know the strip by; it stays when the ID changes.
+    /// Empty until the mixer gives it one.
+    pub key: String,
     pub label: String,
     pub params: engine::StripParams,
     /// The buses it feeds, by bus ID (`A1`, `B3`).
@@ -407,6 +410,7 @@ pub struct SavedStrip {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedBus {
     pub id: String,
+    pub key: String,
     pub label: String,
     pub params: engine::BusParams,
     pub device: String,
@@ -439,6 +443,26 @@ fn boolean(table: &Table, key: &str) -> bool {
 
 fn text(table: &Table, key: &str) -> String {
     table.get(key).and_then(Item::as_str).unwrap_or_default().trim().to_string()
+}
+
+/// A strip's or bus's key: lowercase letters and digits, or empty.
+fn key_text(table: &Table) -> String {
+    let key = text(table, "key").to_ascii_lowercase();
+    if (1..=32).contains(&key.len()) && key.chars().all(|c| c.is_ascii_alphanumeric()) { key } else { String::new() }
+}
+
+/// A new key for a strip or bus, unlike any in `taken`.
+pub fn new_key(taken: &[&str]) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    loop {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        hasher.write_u128(now);
+        let key = format!("{:012x}", hasher.finish() & 0xffff_ffff_ffff);
+        if !taken.contains(&key.as_str()) {
+            return key;
+        }
+    }
 }
 
 /// Whether `id` names a strip or bus: a letter and a number, up to the
@@ -500,6 +524,7 @@ pub fn config_mixer(config: &Config) -> SavedMixer {
                 })
                 .unwrap_or_default();
             mixer.strips.push(SavedStrip {
+                key: key_text(table),
                 label: text(table, "label").chars().take(MAX_CABLE_NAME).collect(),
                 device: text(table, "device"),
                 exclusive: boolean(table, "exclusive"),
@@ -526,6 +551,7 @@ pub fn config_mixer(config: &Config) -> SavedMixer {
             }
             .sanitized();
             mixer.buses.push(SavedBus {
+                key: key_text(table),
                 label: text(table, "label").chars().take(MAX_CABLE_NAME).collect(),
                 device: text(table, "device"),
                 exclusive: boolean(table, "exclusive"),
@@ -552,6 +578,9 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
         .map(|s| {
             let mut t = Table::new();
             t.insert("id", value(s.id.as_str()));
+            if !s.key.is_empty() {
+                t.insert("key", value(s.key.as_str()));
+            }
             if !s.label.is_empty() {
                 t.insert("label", value(s.label.as_str()));
             }
@@ -586,6 +615,9 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
         .map(|b| {
             let mut t = Table::new();
             t.insert("id", value(b.id.as_str()));
+            if !b.key.is_empty() {
+                t.insert("key", value(b.key.as_str()));
+            }
             if !b.label.is_empty() {
                 t.insert("label", value(b.label.as_str()));
             }
@@ -730,6 +762,7 @@ pub(crate) mod tests {
         let mixer = SavedMixer {
             strips: vec![SavedStrip {
                 id: "H1".into(),
+                key: "a1b2c3d4e5f6".into(),
                 label: "Mic".into(),
                 params: engine::StripParams { gain_db: -3.5, eq: [1.0, 0.0, -2.0], ..Default::default() },
                 routes: vec!["A1".into(), "B3".into()],
@@ -738,6 +771,7 @@ pub(crate) mod tests {
             }],
             buses: vec![SavedBus {
                 id: "A1".into(),
+                key: String::new(),
                 label: String::new(),
                 params: engine::BusParams { limiter: Some(-1.0), ..Default::default() },
                 device: "{0.0.0.00000000}.{abc}".into(),

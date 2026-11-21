@@ -57,16 +57,27 @@ pub fn ellipsize(text: &str, max: usize) -> String {
 
 /// The device picker of a hardware strip or bus, with its exclusive-mode
 /// switch. Returns the new choice when the user changes it.
-pub fn device_picker(ui: &mut egui::Ui, id: &str, port: &PortView, devices: &[DeviceView]) -> Option<(String, bool)> {
+/// A strip may also take the output of one of `buses`, each a choice (`bus:<key>`)
+/// and its name.
+pub fn device_picker(
+    ui: &mut egui::Ui,
+    id: &str,
+    port: &PortView,
+    devices: &[DeviceView],
+    buses: &[(String, String)],
+) -> Option<(String, bool)> {
     let mut endpoint = port.endpoint.clone();
     let mut exclusive = port.exclusive;
     let name_of = |endpoint: &str| -> String {
         match endpoint {
             "" => "No device".into(),
             devices::DEFAULT_ENDPOINT => "Default device".into(),
-            id => {
-                devices.iter().find(|d| d.id == id).map(|d| d.name.clone()).unwrap_or_else(|| "(not connected)".into())
-            }
+            id => devices
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.name.clone())
+                .or_else(|| buses.iter().find(|(choice, _)| choice == id).map(|(_, name)| format!("From {name}")))
+                .unwrap_or_else(|| "(not connected)".into()),
         }
     };
     let selected = name_of(&endpoint);
@@ -85,10 +96,21 @@ pub fn device_picker(ui: &mut egui::Ui, id: &str, port: &PortView, devices: &[De
             for device in devices {
                 ui.selectable_value(&mut endpoint, device.id.clone(), &device.name);
             }
+            if !buses.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Mixer outputs").small().color(Color32::GRAY));
+                for (choice, name) in buses {
+                    ui.selectable_value(&mut endpoint, choice.clone(), format!("From {name}"));
+                }
+            }
         })
         .response
         .on_hover_text(selected);
-    ui.add_enabled_ui(!endpoint.is_empty(), |ui| {
+    let from_bus = endpoint.starts_with(crate::mixer::BUS_SOURCE);
+    if from_bus {
+        exclusive = false;
+    }
+    ui.add_enabled_ui(!endpoint.is_empty() && !from_bus, |ui| {
         ui.checkbox(&mut exclusive, RichText::new("Exclusive").small())
             .on_hover_text("Use the device alone, at its lowest latency. Other apps cannot use it meanwhile.");
     });
@@ -112,9 +134,59 @@ pub fn fader(ui: &mut egui::Ui, id: &str, gain_db: &mut f32, peak: [f32; 2], red
         let _ = id;
         scale(ui);
     });
-    let text = if *gain_db <= MIN_DB { "-inf dB".to_string() } else { format!("{:+.1} dB", gain_db) };
-    ui.label(RichText::new(text).monospace());
-    changed
+    let typed = ui
+        .add(
+            egui::DragValue::new(gain_db)
+                .update_while_editing(false)
+                .range(MIN_DB..=12.0)
+                .speed(0.1)
+                .custom_formatter(|db, _| format_db(db as f32))
+                .custom_parser(parse_db),
+        )
+        .on_hover_text("Click to type a level in dB, or drag");
+    changed | typed.changed()
+}
+
+/// A fader level as shown: `-6.0 dB`, `+3.0 dB`, or `-inf dB` at the bottom.
+pub fn format_db(db: f32) -> String {
+    if db <= MIN_DB { "-inf dB".to_string() } else { format!("{db:+.1} dB") }
+}
+
+/// A level as typed: `-6`, `-6 dB`, `+3.5db`, or `-inf`. Values out of
+/// range are brought into it by the control.
+pub fn parse_db(text: &str) -> Option<f64> {
+    let text = text.trim().trim_end_matches(['d', 'D', 'b', 'B']).trim();
+    match text.to_ascii_lowercase().as_str() {
+        "-inf" | "inf" | "-∞" => Some(MIN_DB as f64),
+        _ => parse_number(text),
+    }
+}
+
+/// A number as typed, with or without a trailing `dB`.
+pub fn parse_number(text: &str) -> Option<f64> {
+    let text = text.trim().trim_end_matches(['d', 'D', 'b', 'B']).trim();
+    text.trim_start_matches('+').parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// A balance as shown: `C`, `L40` or `R25` (percent of the way to one side).
+pub fn format_pan(percent: f64) -> String {
+    match percent.round() as i32 {
+        0 => "C".into(),
+        n if n < 0 => format!("L{}", -n),
+        n => format!("R{n}"),
+    }
+}
+
+/// A balance as typed: `C`, `L40`, `R25`, or a number from -100 (left) to 100.
+pub fn parse_pan(text: &str) -> Option<f64> {
+    let text = text.trim().trim_end_matches('%').trim().to_ascii_uppercase();
+    let number = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    match text.chars().next()? {
+        'C' if text.len() == 1 => Some(0.0),
+        'L' => number(&text[1..]).map(|n| -n.abs()),
+        'R' => number(&text[1..]).map(f64::abs),
+        _ => number(&text),
+    }
 }
 
 /// Maps a level to the meter's height, -60 dBFS to 0 dBFS.
@@ -192,8 +264,7 @@ pub fn pan(ui: &mut egui::Ui, id: &str, pan: &mut f32) -> bool {
     let _ = id;
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("L").small());
-        ui.spacing_mut().slider_width = STRIP_WIDTH - 36.0;
+        ui.spacing_mut().slider_width = STRIP_WIDTH - 44.0;
         let response = ui
             .add(egui::Slider::new(pan, -1.0..=1.0).show_value(false))
             .on_hover_text("Balance (double-click to centre)");
@@ -202,7 +273,22 @@ pub fn pan(ui: &mut egui::Ui, id: &str, pan: &mut f32) -> bool {
             changed = true;
         }
         changed |= response.changed();
-        ui.label(RichText::new("R").small());
+        let mut percent = *pan as f64 * 100.0;
+        let typed = ui
+            .add_sized(
+                [36.0, 16.0],
+                egui::DragValue::new(&mut percent)
+                    .update_while_editing(false)
+                    .range(-100.0..=100.0)
+                    .speed(1.0)
+                    .custom_formatter(|p, _| format_pan(p))
+                    .custom_parser(parse_pan),
+            )
+            .on_hover_text("Click to type a balance: C, L40, R25");
+        if typed.changed() {
+            *pan = (percent / 100.0) as f32;
+            changed = true;
+        }
     });
     changed
 }
@@ -220,17 +306,32 @@ pub fn knob_row(ui: &mut egui::Ui, label: &str, value: &mut f32, range: RangeInc
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.add_sized([38.0, 14.0], egui::Label::new(RichText::new(label).small()));
-        ui.spacing_mut().slider_width = STRIP_WIDTH - 82.0;
+        ui.spacing_mut().slider_width = STRIP_WIDTH - 88.0;
         let default = if *range.start() < 0.0 && *range.end() > 0.0 { 0.0 } else { *range.start() };
         let default = if label == "Ceiling" { -1.0 } else { default };
-        let response = ui.add(egui::Slider::new(value, range).show_value(false));
+        let response = ui.add(egui::Slider::new(value, range.clone()).show_value(false));
         if response.double_clicked() {
             *value = default;
             changed = true;
         }
         changed |= response.changed();
-        let text = if unit.is_empty() { format!("{value:.1}") } else { format!("{value:+.0}") };
-        ui.label(RichText::new(text).small().monospace());
+        let decibels = !unit.is_empty();
+        let typed = ui
+            .add_sized(
+                [38.0, 16.0],
+                egui::DragValue::new(value)
+                    .update_while_editing(false)
+                    .range(range)
+                    .speed(0.1)
+                    .custom_formatter(move |v, _| if decibels { format!("{v:+.1}") } else { format!("{v:.1}") })
+                    .custom_parser(parse_number),
+            )
+            .on_hover_text(if decibels {
+                "Click to type a value in dB"
+            } else {
+                "Click to type a value, 0 (off) to 10"
+            });
+        changed |= typed.changed();
     });
     changed
 }
@@ -249,6 +350,11 @@ pub fn port_status(ui: &mut egui::Ui, port: &PortView) {
         ),
         "opening" => (PENDING_COLOR, "Opening\u{2026}".into(), String::new()),
         "failed" => (ERROR_COLOR, "Unavailable".into(), port.error.clone()),
+        "bus" => (
+            Color32::GRAY,
+            format!("From {}", port.device_name),
+            "This strip takes that bus's output, 1 ms later, with no virtual device in between.".into(),
+        ),
         _ => (Color32::GRAY, "No device".into(), String::new()),
     };
     let response = ui.label(RichText::new(text).small().color(color));
@@ -279,5 +385,23 @@ mod tests {
         assert!((level_fraction(0.0316) - 0.5).abs() < 0.01, "-30 dBFS is half way");
         assert_eq!(ellipsize("Headset Microphone", 8), "Headset\u{2026}");
         assert_eq!(ellipsize("Mic", 8), "Mic");
+    }
+
+    #[test]
+    fn typed_values_are_read_as_people_write_them() {
+        assert_eq!(parse_db("-6"), Some(-6.0));
+        assert_eq!(parse_db(" +3.5 dB "), Some(3.5));
+        assert_eq!(parse_db("-inf"), Some(-60.0));
+        assert_eq!(parse_db("loud"), None);
+        assert_eq!(parse_db("NaN"), None);
+        assert_eq!(format_db(-60.0), "-inf dB");
+        assert_eq!(format_db(2.0), "+2.0 dB");
+        assert_eq!(parse_pan("c"), Some(0.0));
+        assert_eq!(parse_pan("L40"), Some(-40.0));
+        assert_eq!(parse_pan("r 25%"), Some(25.0));
+        assert_eq!(parse_pan("-10"), Some(-10.0));
+        assert_eq!(parse_pan("left"), None);
+        assert_eq!([format_pan(0.2), format_pan(-40.0), format_pan(25.0)], ["C", "L40", "R25"]);
+        assert_eq!(parse_number("4.5"), Some(4.5));
     }
 }

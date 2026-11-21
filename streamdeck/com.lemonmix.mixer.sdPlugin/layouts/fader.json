@@ -1,0 +1,10 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+	"id": "com.lemonmix.mixer.fader",
+	"items": [
+		{ "key": "title", "type": "text", "rect": [16, 8, 168, 22], "alignment": "left", "font": { "size": 16, "weight": 600 }, "text-overflow": "ellipsis" },
+		{ "key": "value", "type": "text", "rect": [16, 30, 168, 22], "alignment": "left", "font": { "size": 18, "weight": 600 }, "color": "#F7D23E" },
+		{ "key": "gain", "type": "bar", "rect": [16, 58, 168, 12], "value": 0, "range": { "min": 0, "max": 100 }, "subtype": 4, "border_w": 0, "bar_bg_c": "#3A3A3A", "bar_fill_c": "#F7D23E" },
+		{ "key": "meter", "type": "bar", "rect": [16, 78, 168, 8], "value": 0, "range": { "min": 0, "max": 100 }, "subtype": 4, "border_w": 0, "bar_bg_c": "#2A2A2A", "bar_fill_c": "0:#40B450,0.75:#E6C83C,1:#DC463C" }
+	]
+}

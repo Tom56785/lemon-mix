@@ -8,9 +8,13 @@
 mod cli;
 mod config;
 #[cfg(windows)]
+mod ctl;
+#[cfg(windows)]
 mod gui;
 mod icon;
 mod mixer;
+#[cfg(windows)]
+mod pipe_client;
 #[cfg(windows)]
 mod platform;
 mod protocol;
@@ -40,6 +44,13 @@ const LOG_FILE: &str = "LemonMix.log";
 
 fn main() {
     let parsed = Cli::try_parse_from(env::args_os());
+    // Controlling the mixer is a quick request, made often (from a Stream
+    // Deck key, say): it leaves the log alone.
+    #[cfg(windows)]
+    if let Ok(Cli { control: Some(args), .. }) = &parsed {
+        attach_parent_console();
+        std::process::exit(ctl::run(args));
+    }
     // The service keeps its settings and log in a folder shared by every user,
     // and has no desktop to show a dialog on.
     let service = matches!(&parsed, Ok(cli) if cli.service);
@@ -232,6 +243,21 @@ fn fail(logger: &Logger, log_path: &str, title: &str, err: &str, console_only: b
     }
     flush_log();
     1
+}
+
+/// Lets output reach the terminal this was started from, if any: the
+/// executable is a Windows program, which has no console of its own. Output
+/// already redirected to a file or pipe is left as it is.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE};
+    // SAFETY: queries and attaches this process's standard handles.
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() || handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
 }
 
 fn show_fatal_dialog(message: &str) {

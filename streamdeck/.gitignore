@@ -1,0 +1,5 @@
+node_modules/
+build-test/
+dist/
+com.lemonmix.mixer.sdPlugin/bin/
+com.lemonmix.mixer.sdPlugin/logs/

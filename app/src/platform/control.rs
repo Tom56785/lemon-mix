@@ -8,9 +8,11 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use cables::uac2::CableKind;
 
 use super::broker::{forget_cable_devices, request_cable_sync, resync_cables, start_cable_broker, stop_cable_broker};
+use super::remote::PipeServer;
 use crate::config::{Cable, DEFAULT_LISTEN, new_cable, new_cable_serial, save_cables, validate_cable_name};
 use crate::mixer::MixerHost;
 use crate::protocol::{CableView, Reply, Request, Snapshot, Tone};
+use cables::logf;
 use cables::logging::Logger;
 
 static HOST: OnceLock<Arc<MixerHost>> = OnceLock::new();
@@ -21,6 +23,8 @@ static STATUS: Mutex<Option<(Tone, String)>> = Mutex::new(None);
 static CHANGES: Mutex<()> = Mutex::new(());
 /// Called whenever the snapshot may have changed, from any thread.
 static ON_CHANGE: OnceLock<fn()> = OnceLock::new();
+/// The control pipe, served while this process runs the mixer.
+static CONTROL_PIPE: Mutex<Option<PipeServer>> = Mutex::new(None);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|p| p.into_inner())
@@ -58,11 +62,20 @@ pub fn start(cables: Vec<Cable>) {
     let _ = host.restart(&cables);
     changed();
     start_cable_broker();
+    let mut pipe = lock(&CONTROL_PIPE);
+    if pipe.is_none() {
+        *pipe = PipeServer::start_control(&host.logger)
+            .inspect_err(|err| logf!(host.logger, "Controllers cannot reach the mixer: {err}"))
+            .ok();
+    }
 }
 
 /// Takes the cables out of Windows, stops the USB/IP server and lets the
 /// physical devices go.
 pub fn stop() {
+    if let Some(pipe) = lock(&CONTROL_PIPE).take() {
+        pipe.stop();
+    }
     stop_cable_broker();
     if let Some(host) = host() {
         host.stop();
@@ -233,11 +246,17 @@ pub fn handle(request: &Request) -> Result<(), String> {
         Request::SetCableKind { serial, kind } => set_cable_kind(serial, kind),
         Request::Sync => sync_now(),
         Request::Mixer { command } => host().ok_or("The mixer is not available.")?.command(command),
+        Request::Control { action } => {
+            let result = host().ok_or("The mixer is not available.")?.control(action);
+            changed();
+            result
+        }
+        Request::Subscribe { .. } => Err("Subscribe on the control pipe.".into()),
     }
 }
 
 /// Carries out a request and answers it with the current state.
 pub fn reply(request: &Request) -> Reply {
     let result = handle(request);
-    Reply { snapshot: snapshot(), version: crate::VERSION.to_string(), error: result.err() }
+    Reply::new(snapshot(), result.err())
 }

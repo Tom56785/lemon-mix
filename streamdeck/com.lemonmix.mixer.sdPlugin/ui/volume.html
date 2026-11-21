@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<script src="sdpi-components.js"></script>
+		<style>
+			.note { color: #9a9a9a; font-size: 9pt; margin: 8px 16px 0; line-height: 1.4; }
+		</style>
+	</head>
+	<body>
+		<sdpi-item label="Strip or bus">
+			<sdpi-select setting="target" datasource="getTargets" hot-reload placeholder="Choose one" loading="Waiting for Lemon Mix"></sdpi-select>
+		</sdpi-item>
+		<sdpi-item label="Press to">
+			<sdpi-select setting="mode" default="adjust">
+				<option value="adjust">Move the fader by</option>
+				<option value="set">Set the fader to</option>
+			</sdpi-select>
+		</sdpi-item>
+		<sdpi-item label="dB">
+			<sdpi-textfield setting="db" placeholder="3 to go up, -3 to go down"></sdpi-textfield>
+		</sdpi-item>
+		<p class="note">The lists come from Lemon Mix while it runs. A choice follows its strip or bus when others are added, removed or renamed.</p>
+	</body>
+</html>

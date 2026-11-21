@@ -1,0 +1,131 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+	"Name": "Lemon Mix",
+	"Version": "0.1.0.0",
+	"Author": "Thomas Albans",
+	"Description": "Mute, solo, route and set the levels of Lemon Mix's strips and buses, with keys that show how the mixer is set and dials with level meters.",
+	"UUID": "com.lemonmix.mixer",
+	"Icon": "imgs/plugin/icon",
+	"Category": "Lemon Mix",
+	"CategoryIcon": "imgs/plugin/category",
+	"CodePath": "bin/plugin.js",
+	"SDKVersion": 3,
+	"Software": {
+		"MinimumVersion": "7.1"
+	},
+	"OS": [
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"Nodejs": {
+		"Version": "24",
+		"Debug": "enabled"
+	},
+	"Actions": [
+		{
+			"Name": "Mute",
+			"UUID": "com.lemonmix.mixer.mute",
+			"Icon": "imgs/actions/mute",
+			"Tooltip": "Mutes a strip or bus; the key shows whether it is muted",
+			"PropertyInspectorPath": "ui/target.html",
+			"Controllers": [
+				"Keypad"
+			],
+			"DisableAutomaticStates": true,
+			"States": [
+				{
+					"Image": "imgs/keys/mute-off",
+					"TitleAlignment": "bottom"
+				},
+				{
+					"Image": "imgs/keys/mute-on",
+					"TitleAlignment": "bottom"
+				}
+			]
+		},
+		{
+			"Name": "Solo",
+			"UUID": "com.lemonmix.mixer.solo",
+			"Icon": "imgs/actions/solo",
+			"Tooltip": "Solos a strip: while any strip is soloed, only soloed strips are heard",
+			"PropertyInspectorPath": "ui/strip.html",
+			"Controllers": [
+				"Keypad"
+			],
+			"DisableAutomaticStates": true,
+			"States": [
+				{
+					"Image": "imgs/keys/solo-off",
+					"TitleAlignment": "bottom"
+				},
+				{
+					"Image": "imgs/keys/solo-on",
+					"TitleAlignment": "bottom"
+				}
+			]
+		},
+		{
+			"Name": "Route",
+			"UUID": "com.lemonmix.mixer.route",
+			"Icon": "imgs/actions/route",
+			"Tooltip": "Sends a strip to a bus, or stops it; the key lights while it does",
+			"PropertyInspectorPath": "ui/route.html",
+			"Controllers": [
+				"Keypad"
+			],
+			"DisableAutomaticStates": true,
+			"States": [
+				{
+					"Image": "imgs/keys/route-off",
+					"TitleAlignment": "bottom"
+				},
+				{
+					"Image": "imgs/keys/route-on",
+					"TitleAlignment": "bottom"
+				}
+			]
+		},
+		{
+			"Name": "Volume",
+			"UUID": "com.lemonmix.mixer.volume",
+			"Icon": "imgs/actions/volume",
+			"Tooltip": "Moves a fader up or down by a step, or sets it to a level",
+			"PropertyInspectorPath": "ui/volume.html",
+			"Controllers": [
+				"Keypad"
+			],
+			"States": [
+				{
+					"Image": "imgs/keys/volume",
+					"TitleAlignment": "bottom"
+				}
+			]
+		},
+		{
+			"Name": "Fader",
+			"UUID": "com.lemonmix.mixer.fader",
+			"Icon": "imgs/actions/fader",
+			"Tooltip": "A strip's or bus's fader on a dial, with its level meter; press to mute",
+			"PropertyInspectorPath": "ui/fader.html",
+			"Controllers": [
+				"Encoder"
+			],
+			"Encoder": {
+				"layout": "layouts/fader.json",
+				"Icon": "imgs/actions/fader",
+				"TriggerDescription": {
+					"Rotate": "Volume",
+					"Push": "Mute",
+					"Touch": "Mute"
+				}
+			},
+			"States": [
+				{
+					"Image": "imgs/keys/fader"
+				}
+			]
+		}
+	]
+}

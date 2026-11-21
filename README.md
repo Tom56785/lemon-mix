@@ -9,6 +9,8 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 - **Input strips**: any number of hardware inputs (physical recording devices), added and removed in the window, and one virtual input per virtual input or loopback device.
 - **Output buses**: any number of hardware buses, A1, A2, ... (physical playback devices), added and removed in the window, and one virtual bus, B1, B2, ..., per virtual output or loopback device.
 - **Routing matrix**: any strip to any combination of buses, with a button per bus on every strip.
+- **Bus returns**: a hardware strip can take a bus's output instead of a device, to process or re-route a mix without a virtual device in between. Lemon Mix refuses routes that would let a bus hear itself.
+- **Remote control**: a [Stream Deck plugin](streamdeck/README.md) whose keys and dials show the mixer's state, a command line (`LemonMix.exe --control mute Mic`), and a [documented pipe protocol](docs/control-protocol.md) for your own tools.
 - **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise gate and compressor, peak meters with gain-reduction display.
 - **Per bus**: fader, mute, mono, peak limiter, meters.
 - **Virtual devices** of three kinds, added, renamed and removed in the app: *input* (a playback device that apps play into), *output* (a recording device that apps record from, such as a microphone for Discord or OBS) and *loopback* (both, the recording side returning the playback side, like a classic virtual cable).
@@ -53,13 +55,30 @@ Typical setups:
 - *Game and music to headphones and stream*: make a "Game" input device and set it as the game's output; route it to A1 (headphones) and to the B bus of a "Stream" output device that OBS records.
 - *Microphone with processing for calls*: pick the microphone on a hardware strip, turn up its gate and compressor, and route it to the B bus of a "Mic" output device; select "Mic" as the microphone in the call app.
 
-Double-click a hardware strip's or bus's name to rename it, a fader or knob to reset it.
+Double-click a hardware strip's or bus's name to rename it, or a fader or knob to reset it. Click the value under a fader, beside the balance or beside a knob to type an exact value (`-6`, `-inf`, `L40`), then press Enter.
+
+To feed a bus back into the mixer, open a hardware strip's device menu and choose **From A2** (or any bus) under **Mixer outputs**. The strip hears the bus 1 ms after it leaves the bus, after the bus's fader and limiter. A strip never sends to the bus it takes, and a route that would close a loop through other bus-fed strips is refused.
+
+## Stream Deck and the command line
+
+The [Stream Deck plugin](streamdeck/README.md) adds Mute, Solo, Route and Volume keys and a Fader dial for the Stream Deck +. Its keys light up to match the mixer, however it was changed.
+
+From a terminal, a script or any tool that can run a program:
+
+```
+LemonMix.exe --control mute Mic          # toggle; add on or off to set it
+LemonMix.exe --control route Mic A2 on
+LemonMix.exe --control adjust "Game" -3  # or: gain Game -12
+LemonMixCtl.exe status                   # the same commands, in a console
+```
+
+Strips and buses are named by name, by ID (`H1`, `A2`) or by the key that `status` shows, which stays the same when they are renumbered. Run `LemonMixCtl.exe help` for every command; [docs/control-protocol.md](docs/control-protocol.md) describes the pipe they use.
 
 ## On demand or as a Windows service
 
 The header shows where the mixer runs.
 
-- **On demand** (the default): the window runs the mixer. Closing the window keeps it running in the notification area; **Quit** (in the tray menu or the Options menu) stops it, and the virtual devices leave Windows Sound.
+- **On demand** (the default): the window runs the mixer. Closing the window keeps it running in the notification area: click the icon to bring the window back, or right-click it for its menu. **Quit** (in that menu or the Options menu) stops it, and the virtual devices leave Windows Sound.
 - **As a Windows service**: the service runs the mixer from Windows start-up, without the window and without an administrator prompt each time. The window only manages it: every change goes to the service through its pipe, and closing the window leaves the audio running.
 
 **Options > Install as Windows service** asks for administrator approval once, copies the program to `%ProgramFiles%\Lemon Mix` and your `config.toml` to `%ProgramData%\Lemon Mix`, and hands the mixer over to the service. **Options > Uninstall Windows service** stops and removes it, copies its settings back, and runs the mixer on demand again.
@@ -170,7 +189,9 @@ Lemon Mix is written in Rust, as a Cargo workspace.
 | `crates/cables` | The virtual devices: USB/IP server, UAC2 descriptors and control requests for each kind, the bus frame clock, the frame-indexed delay line, attaching with usbip-win2 |
 | `crates/engine` | The mixer: routing graph, mixing, gain ramps, crossfades, EQ, gate, compressor, limiter, meters |
 | `crates/devices` | Physical devices: WASAPI streams and notifications, ring buffers, the resampler and drift controller |
-| `app` | The application: window, notification area icon, configuration, the mixer host, the Windows service and its pipe, the administrator helper and the driver download |
+| `app` | The application: window, notification area icon, configuration, the mixer host, the Windows service and its pipe, the control pipe and `--control` (and `LemonMixCtl.exe`), the administrator helper and the driver download |
+| `streamdeck` | The Stream Deck plugin (TypeScript); see its [README](streamdeck/README.md) |
+| `docs` | The control protocol for controllers |
 
 ## Project status
 

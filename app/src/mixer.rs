@@ -18,7 +18,7 @@ use engine::core::Clock;
 use engine::{BusRing, BusSink, BusSpec, Engine, EngineCable, StripSource, StripSpec, Topology};
 
 use crate::config::{Cable, SavedBus, SavedMixer, SavedStrip, save_mixer};
-use crate::protocol::{BusView, DeviceView, Meter, MixerCommand, PortView, StripView};
+use crate::protocol::{BusView, ControlAction, DeviceView, Meter, MixerCommand, PortView, StripView};
 
 /// The manufacturer string of every cable.
 pub const MANUFACTURER: &str = "Lemon Mix";
@@ -51,6 +51,8 @@ pub struct MixerHost {
     device_lists: Mutex<(Vec<DeviceView>, Vec<DeviceView>)>,
     /// When the settings last changed, for saving them a moment later.
     dirty_since: Mutex<Option<Instant>>,
+    /// The last meter readings, shared by everyone who reads them close together.
+    meter_cache: Mutex<MeterCache>,
     persist: bool,
     stopping: Arc<AtomicBool>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -124,6 +126,7 @@ impl MixerHost {
             clock: Mutex::new(None),
             device_lists: Mutex::new((Vec::new(), Vec::new())),
             dirty_since: Mutex::new(None),
+            meter_cache: Mutex::default(),
             persist,
             stopping: Arc::new(AtomicBool::new(false)),
             workers: Mutex::new(Vec::new()),
@@ -160,7 +163,9 @@ impl MixerHost {
         {
             let mixer = lock(&self.mixer);
             for (n, port) in lock(&self.inputs).iter().enumerate() {
-                if let Some(strip) = mixer.saved.strips.iter().find(|s| s.id == hardware_strip_id(n + 1)) {
+                if let Some(strip) = mixer.saved.strips.iter().find(|s| s.id == hardware_strip_id(n + 1))
+                    && bus_source_key(&strip.device).is_none()
+                {
                     port.configure(DeviceChoice { endpoint: strip.device.clone(), exclusive: strip.exclusive });
                 }
             }
@@ -405,11 +410,24 @@ impl MixerHost {
                 mixer.saved.buses.push(default_bus(id));
             }
         }
+        if ensure_keys(&mut mixer.saved) {
+            self.mark_dirty();
+        }
         let mut topology = Topology::default();
         for id in &strip_ids {
             let saved = mixer.saved.strips.iter().find(|s| &s.id == id).expect("added above");
             let source = if let Some(n) = id.strip_prefix('H').and_then(|n| n.parse::<usize>().ok()) {
-                StripSource::Hardware(inputs.get(n - 1).and_then(PortHandle::input_port))
+                match bus_source_key(&saved.device) {
+                    // Fed from a bus: its index now, or silence if it is gone.
+                    Some(key) => mixer
+                        .saved
+                        .buses
+                        .iter()
+                        .find(|b| b.key == key)
+                        .and_then(|b| bus_ids.iter().position(|id| *id == b.id))
+                        .map_or(StripSource::Hardware(None), StripSource::Bus),
+                    None => StripSource::Hardware(inputs.get(n - 1).and_then(PortHandle::input_port)),
+                }
             } else {
                 let cable = id[1..].parse::<u32>().unwrap_or(0);
                 match audio.get(&cable).and_then(|a| a.input.as_ref().map(|line| (line, &a.playback_active))) {
@@ -453,13 +471,63 @@ impl MixerHost {
             mixer.saved.strips.retain(|s| s.id != strip);
         }
         if !keep_bus {
-            mixer.saved.buses.retain(|b| b.id != bus);
-            for s in &mut mixer.saved.strips {
-                s.routes.retain(|r| r != &bus);
-            }
+            forget_bus(&mut mixer.saved, &bus);
         }
         drop(mixer);
         self.mark_dirty();
+    }
+
+    /// Chooses a hardware strip's or bus's device: "" for none, "default",
+    /// an endpoint ID, or for a strip, `bus:<bus>` to take a bus's output
+    /// (by key, ID or name; it is kept by key).
+    fn set_device(&self, id: &str, endpoint: &str, exclusive: bool) -> Result<(), String> {
+        let strip = id.starts_with('H');
+        let from_bus = match endpoint.strip_prefix(BUS_SOURCE) {
+            Some(_) if !strip => return Err("Only input strips can take a bus's output.".into()),
+            Some(bus) => Some(self.resolve(bus, Want::Bus)?.0),
+            None => None,
+        };
+        let mut mixer = lock(&self.mixer);
+        let mut saved = mixer.saved.clone();
+        let device = match &from_bus {
+            Some(bus) => {
+                let key = saved.buses.iter().find(|b| &b.id == bus).map(|b| b.key.clone()).unwrap_or_default();
+                format!("{BUS_SOURCE}{key}")
+            }
+            None => endpoint.to_string(),
+        };
+        let exclusive = exclusive && from_bus.is_none();
+        let was_from_bus;
+        if strip {
+            let s = saved.strips.iter_mut().find(|s| s.id == id).ok_or("That strip no longer exists.")?;
+            was_from_bus = bus_source_key(&s.device).is_some();
+            (s.device, s.exclusive) = (device.clone(), exclusive);
+            if let Some(bus) = &from_bus {
+                // A strip fed from a bus does not send back to it.
+                s.routes.retain(|r| r != bus);
+            }
+            if let Some(bus) = feedback_loop(&saved) {
+                return Err(format!("That would feed {} back into itself: stop sending it there first.", bus));
+            }
+        } else {
+            let b = saved.buses.iter_mut().find(|b| b.id == id).ok_or("That bus no longer exists.")?;
+            was_from_bus = false;
+            (b.device, b.exclusive) = (device.clone(), exclusive);
+        }
+        // A strip fed from a bus lets its device go.
+        let choice =
+            if from_bus.is_some() { DeviceChoice::default() } else { DeviceChoice { endpoint: device, exclusive } };
+        let ports = lock(if strip { &self.inputs } else { &self.outputs });
+        let port = id[1..].parse::<usize>().ok().and_then(|n| ports.get(n.wrapping_sub(1)));
+        port.ok_or("Only hardware strips and buses have devices.")?.configure(choice);
+        drop(ports);
+        mixer.saved = saved;
+        let cables = mixer.cables.clone();
+        drop(mixer);
+        if from_bus.is_some() || was_from_bus {
+            self.rebuild(&cables);
+        }
+        Ok(())
     }
 
     /// Carries out a mixer command.
@@ -474,23 +542,10 @@ impl MixerHost {
             MixerCommand::RemoveStrip { id } => self.remove_hardware(id, true)?,
             MixerCommand::RemoveBus { id } => self.remove_hardware(id, false)?,
             MixerCommand::Device { id, endpoint, exclusive } => {
-                let choice = DeviceChoice { endpoint: endpoint.trim().to_string(), exclusive: *exclusive };
-                let mut mixer = lock(&self.mixer);
-                let configured = match id.split_at_checked(1) {
-                    Some(("H", n)) => n.parse::<usize>().ok().and_then(|n| {
-                        lock(&self.inputs).get(n.wrapping_sub(1)).map(|port| port.configure(choice.clone()))
-                    }),
-                    Some(("A", n)) => n.parse::<usize>().ok().and_then(|n| {
-                        lock(&self.outputs).get(n.wrapping_sub(1)).map(|port| port.configure(choice.clone()))
-                    }),
-                    _ => None,
-                };
-                configured.ok_or("Only hardware strips and buses have devices.")?;
-                if let Some(strip) = mixer.saved.strips.iter_mut().find(|s| &s.id == id) {
-                    (strip.device, strip.exclusive) = (choice.endpoint, choice.exclusive);
-                } else if let Some(bus) = mixer.saved.buses.iter_mut().find(|b| &b.id == id) {
-                    (bus.device, bus.exclusive) = (choice.endpoint, choice.exclusive);
+                if !(id.starts_with('H') || id.starts_with('A')) {
+                    return Err("Only hardware strips and buses have devices.".into());
                 }
+                self.set_device(id, endpoint.trim(), *exclusive)?;
             }
             MixerCommand::Strip { id, params } => {
                 let mut mixer = lock(&self.mixer);
@@ -505,13 +560,17 @@ impl MixerHost {
                 let index = mixer.strips.iter().position(|s| s == id).ok_or("That strip no longer exists.")?;
                 let bus_index = mixer.buses.iter().position(|b| b == bus).ok_or("That bus no longer exists.")?;
                 let buses = mixer.buses.clone();
-                let strip =
-                    mixer.saved.strips.iter_mut().find(|s| &s.id == id).ok_or("That strip no longer exists.")?;
+                let mut saved = mixer.saved.clone();
+                let strip = saved.strips.iter_mut().find(|s| &s.id == id).ok_or("That strip no longer exists.")?;
                 strip.routes.retain(|r| r != bus);
                 if *on {
                     strip.routes.push(bus.clone());
                     strip.routes.sort_by_key(|r| buses.iter().position(|b| b == r));
                 }
+                if let Some(looped) = feedback_loop(&saved) {
+                    return Err(format!("That would feed {looped} back into itself."));
+                }
+                mixer.saved = saved;
                 self.engine.set_route(index, bus_index, *on);
             }
             MixerCommand::Bus { id, params } => {
@@ -561,11 +620,9 @@ impl MixerHost {
             let n: u32 = id[1..].parse().unwrap_or(0);
             mixer.cables.iter().find(|c| c.id == n).map(|c| c.name.clone()).unwrap_or_default()
         };
-        let meters = self.engine.meters();
-        let meter = |m: Option<&engine::meters::Meter>| {
-            let r = m
-                .map(engine::meters::Meter::take)
-                .unwrap_or(engine::MeterReading { reduction: 1.0, ..Default::default() });
+        let (strip_meters, bus_meters) = self.meter_readings();
+        let meter = |m: Option<&engine::MeterReading>| {
+            let r = m.copied().unwrap_or(engine::MeterReading { reduction: 1.0, ..Default::default() });
             Meter { peak: r.peak, rms: r.rms, reduction: r.reduction }
         };
         let inputs = lock(&self.inputs);
@@ -573,6 +630,17 @@ impl MixerHost {
         let port = |ports: &[PortHandle], index: usize, saved_device: &str, exclusive: bool| match ports.get(index) {
             Some(port) => port_view(port, saved_device.to_string(), exclusive),
             None => PortView { endpoint: saved_device.to_string(), exclusive, ..Default::default() },
+        };
+        // The name a bus is shown by, for strips fed from it.
+        let bus_label = |key: &str| {
+            let bus = mixer.saved.buses.iter().find(|b| b.key == key)?;
+            Some(if !bus.label.is_empty() {
+                bus.label.clone()
+            } else if bus.id.starts_with('A') {
+                bus.id.clone()
+            } else {
+                cable_name(&bus.id)
+            })
         };
         let strips = mixer
             .strips
@@ -588,13 +656,23 @@ impl MixerHost {
                 } else {
                     cable_name(id)
                 };
-                let port = hardware.then(|| port(&inputs, index, &saved.device, saved.exclusive));
+                let port = hardware.then(|| match bus_source_key(&saved.device) {
+                    // Fed from a bus: no device of its own.
+                    Some(key) => PortView {
+                        endpoint: saved.device.clone(),
+                        state: "bus".into(),
+                        device_name: bus_label(key).unwrap_or_default(),
+                        ..Default::default()
+                    },
+                    None => port(&inputs, index, &saved.device, saved.exclusive),
+                });
                 Some(StripView {
                     id: id.clone(),
+                    key: saved.key.clone(),
                     label,
                     params: saved.params.clone(),
                     routes: saved.routes.clone(),
-                    meter: meter(meters.strips.get(index)),
+                    meter: meter(strip_meters.get(index)),
                     port,
                 })
             })
@@ -616,14 +694,130 @@ impl MixerHost {
                 let port = hardware.then(|| port(&outputs, index, &saved.device, saved.exclusive));
                 Some(BusView {
                     id: id.clone(),
+                    key: saved.key.clone(),
                     label,
                     params: saved.params.clone(),
-                    meter: meter(meters.buses.get(index)),
+                    meter: meter(bus_meters.get(index)),
                     port,
                 })
             })
             .collect();
         (strips, buses)
+    }
+
+    /// Every strip's and bus's meter. Reading a meter resets its peak, so
+    /// readers close together (the window and controllers) share one reading
+    /// rather than each seeing part of the peaks.
+    fn meter_readings(&self) -> (Vec<engine::MeterReading>, Vec<engine::MeterReading>) {
+        let bank = self.engine.meters();
+        let mut cache = lock(&self.meter_cache);
+        let fresh = cache.at.is_some_and(|at| at.elapsed() < METER_SHARING)
+            && cache.bank.as_ref().is_some_and(|b| Arc::ptr_eq(b, &bank));
+        if !fresh {
+            cache.strips = bank.strips.iter().map(engine::meters::Meter::take).collect();
+            cache.buses = bank.buses.iter().map(engine::meters::Meter::take).collect();
+            cache.at = Some(Instant::now());
+            cache.bank = Some(bank);
+        }
+        (cache.strips.clone(), cache.buses.clone())
+    }
+
+    /// Finds the strip or bus a controller names (see `ControlAction`).
+    /// Returns its ID and whether it is a strip.
+    pub fn resolve(&self, target: &str, want: Want) -> Result<(String, bool), String> {
+        let target = target.trim();
+        let (strips, buses) = self.views();
+        let strips = strips.iter().map(|s| (&s.id, &s.key, &s.label, true));
+        let buses = buses.iter().map(|b| (&b.id, &b.key, &b.label, false));
+        let all: Vec<_> = strips.chain(buses).filter(|&(.., strip)| want.allows(strip)).collect();
+        let (name, kinds) = match target.split_once(':') {
+            Some((kind, name)) if kind.eq_ignore_ascii_case("strip") => (name.trim(), Want::Strip),
+            Some((kind, name)) if kind.eq_ignore_ascii_case("bus") => (name.trim(), Want::Bus),
+            _ => (target, Want::Either),
+        };
+        if kinds == Want::Either
+            && let Some(&(id, .., strip)) =
+                all.iter().find(|(id, key, ..)| *key == target || id.eq_ignore_ascii_case(target))
+        {
+            return Ok((id.clone(), strip));
+        }
+        let named: Vec<_> = all
+            .iter()
+            .filter(|&&(_, _, label, strip)| kinds.allows(strip) && label.eq_ignore_ascii_case(name))
+            .collect();
+        match named.as_slice() {
+            [(id, .., strip)] => Ok(((*id).clone(), *strip)),
+            [] => Err(format!("There is no {} named \"{target}\".", want.noun())),
+            _ => Err(format!(
+                "More than one strip or bus is named \"{name}\": use strip:{name} or bus:{name}, or an ID such as {}.",
+                named.iter().map(|(id, ..)| id.as_str()).collect::<Vec<_>>().join(" or ")
+            )),
+        }
+    }
+
+    /// Carries out a controller's change.
+    pub fn control(&self, action: &ControlAction) -> Result<(), String> {
+        let switch = |current: bool, on: &Option<bool>| on.unwrap_or(!current);
+        match action {
+            ControlAction::Mute { target, on } => match self.resolve(target, Want::Either)? {
+                (id, true) => self.update_strip(&id, |p| p.mute = switch(p.mute, on)),
+                (id, false) => self.update_bus(&id, |p| p.mute = switch(p.mute, on)),
+            },
+            ControlAction::Solo { target, on } => {
+                let (id, _) = self.resolve(target, Want::Strip)?;
+                self.update_strip(&id, |p| p.solo = switch(p.solo, on))
+            }
+            ControlAction::Mono { target, on } => match self.resolve(target, Want::Either)? {
+                (id, true) => self.update_strip(&id, |p| p.mono = switch(p.mono, on)),
+                (id, false) => self.update_bus(&id, |p| p.mono = switch(p.mono, on)),
+            },
+            ControlAction::Gain { target, db } | ControlAction::AdjustGain { target, db } => {
+                if !db.is_finite() {
+                    return Err("The gain must be a number of dB.".into());
+                }
+                let relative = matches!(action, ControlAction::AdjustGain { .. });
+                let gain = |current: f32| if relative { current + db } else { *db };
+                match self.resolve(target, Want::Either)? {
+                    (id, true) => self.update_strip(&id, |p| p.gain_db = gain(p.gain_db)),
+                    (id, false) => self.update_bus(&id, |p| p.gain_db = gain(p.gain_db)),
+                }
+            }
+            ControlAction::Route { strip, bus, on } => {
+                let (strip, _) = self.resolve(strip, Want::Strip)?;
+                let (bus, _) = self.resolve(bus, Want::Bus)?;
+                let mixer = lock(&self.mixer);
+                let current =
+                    mixer.saved.strips.iter().find(|s| s.id == strip).is_some_and(|s| s.routes.contains(&bus));
+                drop(mixer);
+                self.command(&MixerCommand::Route { strip, bus, on: switch(current, on) })
+            }
+        }
+    }
+
+    /// Changes a strip's settings in place.
+    fn update_strip(&self, id: &str, change: impl FnOnce(&mut engine::StripParams)) -> Result<(), String> {
+        let mut mixer = lock(&self.mixer);
+        let index = mixer.strips.iter().position(|s| s == id).ok_or("That strip no longer exists.")?;
+        let strip = mixer.saved.strips.iter_mut().find(|s| s.id == id).ok_or("That strip no longer exists.")?;
+        change(&mut strip.params);
+        strip.params = strip.params.clone().sanitized();
+        self.engine.set_strip(index, strip.params.clone());
+        drop(mixer);
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Changes a bus's settings in place.
+    fn update_bus(&self, id: &str, change: impl FnOnce(&mut engine::BusParams)) -> Result<(), String> {
+        let mut mixer = lock(&self.mixer);
+        let index = mixer.buses.iter().position(|b| b == id).ok_or("That bus no longer exists.")?;
+        let bus = mixer.saved.buses.iter_mut().find(|b| b.id == id).ok_or("That bus no longer exists.")?;
+        change(&mut bus.params);
+        bus.params = bus.params.clone().sanitized();
+        self.engine.set_bus(index, bus.params.clone());
+        drop(mixer);
+        self.mark_dirty();
+        Ok(())
     }
 
     /// The settings to save, with the number of hardware strips and buses.
@@ -647,10 +841,7 @@ impl MixerHost {
         if strip {
             mixer.saved.strips.retain(|s| s.id != id);
         } else {
-            mixer.saved.buses.retain(|b| b.id != id);
-            for s in &mut mixer.saved.strips {
-                s.routes.retain(|r| r != &id);
-            }
+            forget_bus(&mut mixer.saved, &id);
         }
         let cables = mixer.cables.clone();
         drop(mixer);
@@ -695,14 +886,13 @@ impl MixerHost {
                 }
             }
         } else {
-            mixer.saved.buses.retain(|b| b.id != id);
+            forget_bus(&mut mixer.saved, id);
             for b in &mut mixer.saved.buses {
                 if let Some(new) = moved(&b.id) {
                     b.id = new;
                 }
             }
             for s in &mut mixer.saved.strips {
-                s.routes.retain(|r| r != id);
                 for route in &mut s.routes {
                     if let Some(new) = moved(route) {
                         *route = new;
@@ -739,6 +929,110 @@ impl MixerHost {
     }
 }
 
+/// What a hardware strip's device starts with when it takes a bus's output
+/// instead: `bus:` and the bus's key.
+pub const BUS_SOURCE: &str = "bus:";
+
+/// The key of the bus a strip's device names, if it names one.
+pub fn bus_source_key(device: &str) -> Option<&str> {
+    device.strip_prefix(BUS_SOURCE)
+}
+
+/// Forgets a bus that is gone: its settings, every route to it, and every
+/// strip fed from it.
+fn forget_bus(saved: &mut SavedMixer, id: &str) {
+    let key = saved.buses.iter().find(|b| b.id == id).map(|b| b.key.clone());
+    saved.buses.retain(|b| b.id != id);
+    for s in &mut saved.strips {
+        s.routes.retain(|r| r != id);
+        if key.as_deref().is_some_and(|key| bus_source_key(&s.device) == Some(key)) {
+            s.device.clear();
+        }
+    }
+}
+
+/// A bus that would hear itself: one that feeds a strip that sends, directly
+/// or through other fed strips, back to it. Strips fed from a bus hear it a
+/// frame late, so a loop would not hang the engine, but it would howl.
+fn feedback_loop(saved: &SavedMixer) -> Option<String> {
+    // The buses a bus reaches in one step: where the strips it feeds send.
+    let next = |bus: &str| -> Vec<String> {
+        let Some(key) = saved.buses.iter().find(|b| b.id == bus).map(|b| b.key.as_str()) else {
+            return Vec::new();
+        };
+        saved.strips.iter().filter(|s| bus_source_key(&s.device) == Some(key)).flat_map(|s| s.routes.clone()).collect()
+    };
+    for start in saved.buses.iter().map(|b| b.id.as_str()) {
+        let mut seen: Vec<String> = Vec::new();
+        let mut stack = next(start);
+        while let Some(bus) = stack.pop() {
+            if bus == start {
+                return Some(start.to_string());
+            }
+            if !seen.contains(&bus) {
+                stack.extend(next(&bus));
+                seen.push(bus);
+            }
+        }
+    }
+    None
+}
+
+/// Which a controller's target may name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Want {
+    Strip,
+    Bus,
+    Either,
+}
+
+impl Want {
+    fn allows(self, strip: bool) -> bool {
+        match self {
+            Want::Strip => strip,
+            Want::Bus => !strip,
+            Want::Either => true,
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Want::Strip => "strip",
+            Want::Bus => "bus",
+            Want::Either => "strip or bus",
+        }
+    }
+}
+
+/// Meter readings taken less than this long ago are shared.
+const METER_SHARING: Duration = Duration::from_millis(25);
+
+#[derive(Default)]
+struct MeterCache {
+    /// The bank the readings came from: a new topology has a new one.
+    bank: Option<Arc<engine::MeterBank>>,
+    at: Option<Instant>,
+    strips: Vec<engine::MeterReading>,
+    buses: Vec<engine::MeterReading>,
+}
+
+/// Gives every strip and bus without a key, or with one an earlier one has
+/// (as in a file edited by hand), a new key. Returns whether any changed.
+fn ensure_keys(saved: &mut SavedMixer) -> bool {
+    let mut taken: Vec<String> = Vec::new();
+    let mut changed = false;
+    let keys = saved.strips.iter_mut().map(|s| &mut s.key).chain(saved.buses.iter_mut().map(|b| &mut b.key));
+    for key in keys {
+        if key.is_empty() || taken.contains(key) {
+            let refs: Vec<&str> = taken.iter().map(String::as_str).collect();
+            *key = crate::config::new_key(&refs);
+            changed = true;
+        }
+        taken.push(key.clone());
+    }
+    changed
+}
+
 /// The settings of a strip the user has not touched yet.
 fn default_strip(id: &str, cables: &[Cable]) -> SavedStrip {
     let routes = match id.split_at(1) {
@@ -752,6 +1046,7 @@ fn default_strip(id: &str, cables: &[Cable]) -> SavedStrip {
     };
     SavedStrip {
         id: id.to_string(),
+        key: String::new(),
         label: String::new(),
         params: engine::StripParams::default(),
         routes,
@@ -765,6 +1060,7 @@ fn default_strip(id: &str, cables: &[Cable]) -> SavedStrip {
 fn default_bus(id: &str) -> SavedBus {
     SavedBus {
         id: id.to_string(),
+        key: String::new(),
         label: String::new(),
         params: engine::BusParams::default(),
         device: if id == "A1" { devices::DEFAULT_ENDPOINT.to_string() } else { String::new() },
@@ -962,6 +1258,113 @@ mod tests {
         assert_eq!(host.views().0[2].label, "Hardware 3");
         assert!(host.command(&MixerCommand::RemoveStrip { id: "V1".into() }).is_err());
         assert!(host.command(&MixerCommand::RemoveStrip { id: "H9".into() }).is_err());
+        host.shutdown();
+    }
+
+    /// Controllers name strips and buses by key, ID or name, and switch
+    /// settings on, off or over.
+    #[test]
+    fn controllers_name_strips_and_buses_as_people_do() {
+        let host = MixerHost::new(settings(), SavedMixer::default(), &Logger::discard(), "", false);
+        host.apply(&[cable(1, CableKind::Loopback)]).unwrap();
+        host.command(&MixerCommand::Label { id: "H2".into(), label: "Mic".into() }).unwrap();
+        let (strips, buses) = host.views();
+        let keys: Vec<&str> =
+            strips.iter().map(|s| s.key.as_str()).chain(buses.iter().map(|b| b.key.as_str())).collect();
+        assert!(keys.iter().all(|k| k.len() == 12), "{keys:?}");
+        let mut unique = keys.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len());
+
+        let resolve = |target: &str, want| host.resolve(target, want);
+        assert_eq!(resolve("mic", Want::Either), Ok(("H2".into(), true)));
+        assert_eq!(resolve("h2", Want::Either), Ok(("H2".into(), true)));
+        assert_eq!(resolve(&strips[1].key, Want::Either), Ok(("H2".into(), true)));
+        assert_eq!(resolve("A2", Want::Bus), Ok(("A2".into(), false)));
+        assert!(resolve("A2", Want::Strip).is_err(), "a bus is not a strip");
+        // The loopback cable's strip and bus share its name.
+        let ambiguous = resolve("C1", Want::Either).unwrap_err();
+        assert!(ambiguous.contains("strip:C1") && ambiguous.contains("V1 or B1"), "{ambiguous}");
+        assert_eq!(resolve("bus:c1", Want::Either), Ok(("B1".into(), false)));
+        assert_eq!(resolve("C1", Want::Strip), Ok(("V1".into(), true)));
+        assert!(resolve("Nobody", Want::Either).is_err());
+
+        let control = |action| host.control(&action);
+        control(ControlAction::Mute { target: "Mic".into(), on: None }).unwrap();
+        control(ControlAction::Solo { target: "Mic".into(), on: Some(true) }).unwrap();
+        control(ControlAction::Mute { target: "A1".into(), on: Some(true) }).unwrap();
+        control(ControlAction::Gain { target: "Mic".into(), db: -10.0 }).unwrap();
+        control(ControlAction::AdjustGain { target: "Mic".into(), db: 3.5 }).unwrap();
+        control(ControlAction::AdjustGain { target: "A1".into(), db: 99.0 }).unwrap();
+        control(ControlAction::Route { strip: "Mic".into(), bus: "A2".into(), on: None }).unwrap();
+        control(ControlAction::Route { strip: "Mic".into(), bus: "A1".into(), on: None }).unwrap();
+        assert!(control(ControlAction::Solo { target: "A1".into(), on: None }).is_err(), "buses have no solo");
+        assert!(control(ControlAction::Gain { target: "Mic".into(), db: f32::NAN }).is_err());
+        let (strips, buses) = host.views();
+        let mic = &strips[1].params;
+        assert!(mic.mute && mic.solo && !mic.mono);
+        assert_eq!(mic.gain_db, -6.5);
+        assert_eq!(strips[1].routes, ["A2"], "A1 toggled off, A2 on");
+        assert!(buses[0].params.mute);
+        assert_eq!(buses[0].params.gain_db, engine::params::MAX_GAIN_DB, "kept in range");
+        host.control(&ControlAction::Mute { target: "Mic".into(), on: None }).unwrap();
+        assert!(!host.views().0[1].params.mute, "toggled back");
+
+        // The key stays with the strip when its ID changes.
+        let key = host.views().0[1].key.clone();
+        host.command(&MixerCommand::RemoveStrip { id: "H1".into() }).unwrap();
+        assert_eq!(host.resolve(&key, Want::Either), Ok(("H1".into(), true)));
+        host.shutdown();
+    }
+
+    /// A hardware strip can take a bus's output; loops are refused, and a
+    /// strip fed from a bus that goes falls silent.
+    #[test]
+    fn buses_feed_strips_without_loops() {
+        let host = MixerHost::new(settings(), SavedMixer::default(), &Logger::discard(), "", false);
+        host.apply(&[cable(1, CableKind::Loopback)]).unwrap();
+        host.command(&MixerCommand::AddStrip).unwrap();
+        let device = |id: &str, endpoint: &str| {
+            host.command(&MixerCommand::Device { id: id.into(), endpoint: endpoint.into(), exclusive: true })
+        };
+        let route = |strip: &str, bus: &str, on| {
+            host.command(&MixerCommand::Route { strip: strip.into(), bus: bus.into(), on })
+        };
+        // H1 takes A2's output; its send to A2 would be a loop, so it goes.
+        route("H1", "A2", true).unwrap();
+        device("H1", "bus:A2").unwrap();
+        let (strips, _) = host.views();
+        let port = strips[0].port.as_ref().unwrap();
+        assert_eq!((port.state.as_str(), port.device_name.as_str(), port.exclusive), ("bus", "A2", false));
+        assert!(port.endpoint.starts_with(BUS_SOURCE) && !port.endpoint.ends_with("A2"), "kept by key");
+        assert_eq!(strips[0].routes, ["A1"]);
+
+        // H2 takes A1, which H1 sends to: sending H2 to A2 would close the loop.
+        device("H2", "bus:A1").unwrap();
+        let refused = route("H2", "A2", true).unwrap_err();
+        assert!(refused.contains("back into itself"), "{refused}");
+        route("H2", "B1", true).unwrap();
+        // And a strip cannot take a bus that it feeds through others.
+        route("H1", "A1", false).unwrap();
+        route("H1", "B1", true).unwrap();
+        // H3 sends to A1, which comes back through H2 to B1.
+        let refused = device("H3", "bus:B1").unwrap_err();
+        assert!(refused.contains("back into itself"), "{refused}");
+        route("H2", "B1", false).unwrap();
+        device("H3", "bus:B1").unwrap();
+        // A2 reaches B1 through H1, so B1's strip cannot send to A2.
+        route("H3", "A2", true).unwrap_err();
+        assert!(device("A1", "bus:B1").is_err(), "buses do not take buses");
+        assert!(device("H4", "bus:Nobody").is_err());
+
+        // Removing A2 leaves H1 with no source, and its key is not reused.
+        host.command(&MixerCommand::RemoveBus { id: "A2".into() }).unwrap();
+        let (strips, _) = host.views();
+        assert_eq!(strips[0].port.as_ref().unwrap().state, "off");
+        assert_eq!(host.saved_mixer().strips[0].device, "");
+        // Back to a device: the strip lets the bus go.
+        device("H2", "").unwrap();
+        assert_eq!(host.views().0[1].port.as_ref().unwrap().state, "off");
         host.shutdown();
     }
 

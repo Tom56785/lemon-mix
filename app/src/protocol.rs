@@ -1,10 +1,18 @@
 //! What the window asks of whoever runs the mixer, and what it gets back.
 //! The same requests go to this process's own mixer when it runs on demand,
 //! and over the Windows service's pipe as JSON when the service runs it.
+//!
+//! Controllers (the Stream Deck plugin, `LemonMix.exe --control`, scripts)
+//! use the same requests over the control pipe, which whichever process runs
+//! the mixer serves; docs/control-protocol.md describes it for them.
 
 use serde::{Deserialize, Serialize};
 
 pub use engine::{BusParams, StripParams};
+
+/// The version of the requests, replies and events, in every reply and
+/// event. It goes up when a change would break an existing controller.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// How a status line reads at a glance, shown as the colour of its dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +42,73 @@ pub enum Request {
     Sync,
     /// Change the mixer.
     Mixer { command: MixerCommand },
+    /// A controller's change, naming strips and buses as people do.
+    Control { action: ControlAction },
+    /// Keep the connection open and send events: the state whenever it
+    /// changes, and with `meters`, the meters about 15 times a second. Only
+    /// the control pipe takes it.
+    Subscribe {
+        #[serde(default)]
+        meters: bool,
+    },
+}
+
+/// A change from a controller. A target names a strip or bus by its key, by
+/// its ID (`H1`, `A2`, `V3`, `B3`), or by its name: `strip:<name>`,
+/// `bus:<name>`, or the bare name when only one strip or bus has it. Names
+/// and IDs are matched ignoring case. A switch is turned on (`true`), off
+/// (`false`), or the other way from how it is (absent or `null`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ControlAction {
+    /// Mute a strip or bus.
+    Mute {
+        target: String,
+        #[serde(default)]
+        on: Option<bool>,
+    },
+    /// Solo a strip.
+    Solo {
+        target: String,
+        #[serde(default)]
+        on: Option<bool>,
+    },
+    /// Sum a strip's or bus's left and right.
+    Mono {
+        target: String,
+        #[serde(default)]
+        on: Option<bool>,
+    },
+    /// Send a strip to a bus.
+    Route {
+        strip: String,
+        bus: String,
+        #[serde(default)]
+        on: Option<bool>,
+    },
+    /// Set a fader, in dB.
+    Gain { target: String, db: f32 },
+    /// Move a fader by this many dB, up or down.
+    AdjustGain { target: String, db: f32 },
+}
+
+/// What a subscription sends, one JSON line each.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum Event {
+    /// The whole state, first and then whenever it changes. Its meters are
+    /// left at zero: they come in `Meters`.
+    State { protocol: u32, version: String, snapshot: Snapshot },
+    /// Every strip's and bus's meter, in the order of the last state.
+    Meters { strips: Vec<KeyedMeter>, buses: Vec<KeyedMeter> },
+}
+
+/// A meter reading with the key of its strip or bus.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KeyedMeter {
+    pub key: String,
+    #[serde(flatten)]
+    pub meter: Meter,
 }
 
 /// A change to the mixer's strips, buses or devices.
@@ -61,7 +136,8 @@ pub enum MixerCommand {
         label: String,
     },
     /// The device of a hardware strip (`H1`) or bus (`A1`): "" for none,
-    /// "default" for the system default, or an endpoint ID.
+    /// "default" for the system default, or an endpoint ID. A strip may
+    /// instead take a bus's output: `bus:` and the bus's key, ID or name.
     Device {
         id: String,
         endpoint: String,
@@ -97,7 +173,8 @@ pub struct DeviceView {
 pub struct PortView {
     pub endpoint: String,
     pub exclusive: bool,
-    /// off, opening, running or failed.
+    /// off, opening, running or failed; `bus` for a strip fed from a bus,
+    /// whose name is then in `device_name`.
     pub state: String,
     pub device_name: String,
     pub error: String,
@@ -120,6 +197,10 @@ pub struct Meter {
 pub struct StripView {
     /// `H1`... for hardware strips, `V<cable id>` for virtual inputs.
     pub id: String,
+    /// Stays with the strip when its ID changes, as when a strip before it is
+    /// removed: what controllers remember it by.
+    #[serde(default)]
+    pub key: String,
     pub label: String,
     pub params: StripParams,
     pub routes: Vec<String>,
@@ -132,6 +213,9 @@ pub struct StripView {
 pub struct BusView {
     /// `A1`... for hardware buses, `B<cable id>` for virtual buses.
     pub id: String,
+    /// Stays with the bus when its ID changes.
+    #[serde(default)]
+    pub key: String,
     pub label: String,
     pub params: BusParams,
     pub meter: Meter,
@@ -168,11 +252,19 @@ pub struct Reply {
     pub snapshot: Snapshot,
     /// The version of whoever answered, which may differ from the window's.
     pub version: String,
+    /// `PROTOCOL_VERSION` of whoever answered.
+    #[serde(default)]
+    pub protocol: u32,
     /// Why the request failed, if it did.
     pub error: Option<String>,
 }
 
 impl Reply {
+    /// A reply from this process, with its versions.
+    pub fn new(snapshot: Snapshot, error: Option<String>) -> Reply {
+        Reply { snapshot, version: crate::VERSION.to_string(), protocol: PROTOCOL_VERSION, error }
+    }
+
     pub fn result(&self) -> Result<(), String> {
         match &self.error {
             Some(err) => Err(err.clone()),
@@ -203,6 +295,9 @@ mod tests {
             },
             Request::Mixer { command: MixerCommand::AddStrip },
             Request::Mixer { command: MixerCommand::RemoveBus { id: "A12".into() } },
+            Request::Control { action: ControlAction::Route { strip: "strip:Mic".into(), bus: "A2".into(), on: None } },
+            Request::Control { action: ControlAction::AdjustGain { target: "8f3a2c1d9e0b".into(), db: -1.5 } },
+            Request::Subscribe { meters: true },
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -210,6 +305,14 @@ mod tests {
             assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), request);
         }
         assert!(serde_json::from_str::<Request>("{\"op\":\"nonsense\"}").is_err());
+        // A controller may leave out a switch to turn it over, and the meters.
+        let toggle: Request =
+            serde_json::from_str(r#"{"op":"control","action":{"action":"mute","target":"Mic"}}"#).unwrap();
+        assert_eq!(toggle, Request::Control { action: ControlAction::Mute { target: "Mic".into(), on: None } });
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"op":"subscribe"}"#).unwrap(),
+            Request::Subscribe { meters: false }
+        );
         // Missing strip settings take their defaults.
         let partial: Request = serde_json::from_str(
             "{\"op\":\"mixer\",\"command\":{\"cmd\":\"strip\",\"id\":\"H1\",\"params\":{\"mute\":true}}}",
