@@ -428,7 +428,16 @@ impl App {
     }
 
     fn options_menu(&mut self, ui: &mut egui::Ui, mode: Mode, state: ServiceState) {
+        let service_version = {
+            let s = lock(&self.shared);
+            (mode == Mode::Service && s.connected && s.version != crate::VERSION).then(|| s.version.clone())
+        };
         ui.menu_button("Options", |ui| {
+            ui.label(RichText::new(format!("Lemon Mix {}", crate::VERSION)).small().color(Color32::GRAY));
+            if let Some(version) = service_version {
+                ui.label(RichText::new(format!("Windows service {version}")).small().color(Color32::GRAY));
+            }
+            ui.separator();
             if ui.button("Sync with Windows Sound").clicked() {
                 self.send(Request::Sync);
                 ui.close_menu();
