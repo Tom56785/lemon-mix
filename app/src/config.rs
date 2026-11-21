@@ -297,10 +297,6 @@ pub fn default_config_content() -> String {
         format!("# Audio kept between each physical device and the mixer, {MIN_BUFFER_MS}-{MAX_BUFFER_MS} ms."),
         "# Raise it if hardware inputs or outputs crackle.".to_string(),
         format!("buffer_ms = {DEFAULT_BUFFER_MS}"),
-        "# Hardware input strips and hardware output buses (A). The application".to_string(),
-        "# updates these when strips or buses are added or removed in the window.".to_string(),
-        format!("hardware_inputs = {DEFAULT_HARDWARE_PORTS}"),
-        format!("hardware_outputs = {DEFAULT_HARDWARE_PORTS}"),
         "# Detailed USB/IP traces in the log, for troubleshooting.".to_string(),
         "diagnostics = false".to_string(),
         "# For troubleshooting: hold all audio transfers this many milliseconds once a".to_string(),
@@ -422,10 +418,25 @@ pub struct SavedBus {
 pub struct SavedMixer {
     pub strips: Vec<SavedStrip>,
     pub buses: Vec<SavedBus>,
-    /// How many hardware strips and buses there are, written to
-    /// `hardware_inputs` and `hardware_outputs` when set. Reading the file
-    /// leaves it unset: the counts are settings, read with the others.
-    pub hardware: Option<(usize, usize)>,
+}
+
+/// How many hardware strips (`H1`...) and buses (`A1`...) there are: up to
+/// the highest numbered [[strip]] and [[bus]] table, since the application
+/// writes one for each. With no strip tables at all, as in a new file, there
+/// are `DEFAULT_HARDWARE_PORTS`, and likewise for buses; an empty list
+/// (`strip = []`) means none.
+pub fn hardware_counts(config: &Config) -> (usize, usize) {
+    let mixer = config_mixer(config);
+    let highest = |ids: &mut dyn Iterator<Item = &String>, letter: char| {
+        ids.filter_map(|id| id.strip_prefix(letter)?.parse::<usize>().ok()).max().unwrap_or(0)
+    };
+    let count = |key: &str, highest: usize| {
+        if config.document.contains_key(key) { highest } else { DEFAULT_HARDWARE_PORTS as usize }
+    };
+    (
+        count(STRIP_KEY, highest(&mut mixer.strips.iter().map(|s| &s.id), 'H')),
+        count(BUS_KEY, highest(&mut mixer.buses.iter().map(|b| &b.id), 'A')),
+    )
 }
 
 fn float(table: &Table, key: &str, fallback: f32) -> f32 {
@@ -572,7 +583,7 @@ fn rounded(v: f32) -> f64 {
 /// Replaces the [[strip]] and [[bus]] tables in `content`, keeping the rest.
 pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, String> {
     let mut document = parse_config(content)?.document;
-    let strips = mixer
+    let strips: Vec<Table> = mixer
         .strips
         .iter()
         .map(|s| {
@@ -609,7 +620,7 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
             t
         })
         .collect();
-    let buses = mixer
+    let buses: Vec<Table> = mixer
         .buses
         .iter()
         .map(|b| {
@@ -634,28 +645,17 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
             t
         })
         .collect();
-    replace_tables(&mut document, STRIP_KEY, strips);
-    replace_tables(&mut document, BUS_KEY, buses);
-    if let Some((inputs, outputs)) = mixer.hardware {
-        set_integer(&mut document, "hardware_inputs", inputs as i64);
-        set_integer(&mut document, "hardware_outputs", outputs as i64);
+    // The tables are how many hardware strips and buses there are, so none
+    // is written as an empty list, which a new file does not have.
+    for (key, tables) in [(STRIP_KEY, strips), (BUS_KEY, buses)] {
+        if tables.is_empty() {
+            document.remove(key);
+            document.insert(key, value(Array::new()));
+        } else {
+            replace_tables(&mut document, key, tables);
+        }
     }
     Ok(keep_line_endings(content, document.to_string()))
-}
-
-/// Sets a top-level integer setting, keeping its place and its comments.
-fn set_integer(document: &mut DocumentMut, key: &str, number: i64) {
-    match document.get_mut(key).and_then(Item::as_value_mut) {
-        Some(existing) if existing.as_integer() == Some(number) => {}
-        Some(existing) => {
-            let decor = existing.decor().clone();
-            *existing = number.into();
-            *existing.decor_mut() = decor;
-        }
-        None => {
-            document.insert(key, value(number));
-        }
-    }
 }
 
 pub fn save_mixer(mixer: &SavedMixer) -> io::Result<()> {
@@ -744,7 +744,7 @@ pub(crate) mod tests {
         assert_eq!(config_string(&config, "listen", ""), DEFAULT_LISTEN);
         assert_eq!(config_int(&config, "latency_ms", 0), DEFAULT_LATENCY_MS);
         assert_eq!(config_int(&config, "buffer_ms", 0), DEFAULT_BUFFER_MS);
-        assert_eq!(config_int(&config, "hardware_inputs", 0), DEFAULT_HARDWARE_PORTS);
+        assert_eq!(hardware_counts(&config), (DEFAULT_HARDWARE_PORTS as usize, DEFAULT_HARDWARE_PORTS as usize));
         assert_eq!(config_int(&config, "stall_test_ms", 1), 0);
         assert!(!config_bool(&config, "diagnostics", true));
         assert_eq!(config_cables(&config), []);
@@ -777,7 +777,6 @@ pub(crate) mod tests {
                 device: "{0.0.0.00000000}.{abc}".into(),
                 exclusive: true,
             }],
-            hardware: None,
         };
         save_mixer(&mixer).unwrap();
         let saved = fs::read_to_string(config_file_path()).unwrap();
@@ -791,19 +790,31 @@ pub(crate) mod tests {
         assert_eq!(config_mixer(&config), mixer);
     }
 
-    /// Adding and removing hardware strips and buses rewrites their counts in
-    /// place, comments and all; any number of them can be saved.
+    /// The tables are the count of hardware strips and buses: none is saved
+    /// as an empty list, which reads back as none rather than a new file's
+    /// defaults.
     #[test]
-    fn hardware_counts_are_saved_in_place() {
-        let content = "# inputs\nhardware_inputs = 5 # five\nlisten = \"x\"\n\n[[cable]]\nid = 1\n";
-        let mixer = SavedMixer { hardware: Some((300, 2)), ..Default::default() };
-        let saved = set_mixer_entries(content, &mixer).unwrap();
-        assert!(saved.starts_with("# inputs\nhardware_inputs = 300 # five\nlisten = \"x\"\n"), "{saved:?}");
+    fn hardware_counts_come_from_the_tables() {
+        let content = "# mine\nlisten = \"x\"\n\n[[cable]]\nid = 1\n";
+        let saved = set_mixer_entries(content, &SavedMixer::default()).unwrap();
+        assert!(saved.starts_with("# mine\nlisten = \"x\"\n"), "{saved:?}");
         let config = parse_config(&saved).unwrap();
-        assert_eq!((config_int(&config, "hardware_inputs", 0), config_int(&config, "hardware_outputs", 0)), (300, 2));
-        assert_eq!(config_cables(&config).len(), 0, "the new key did not land in a table");
-        assert!(config.document.get("cable").is_some());
-        assert_eq!(set_mixer_entries(content, &SavedMixer::default()).unwrap().matches("hardware_").count(), 1);
+        assert_eq!(hardware_counts(&config), (0, 0), "{saved:?}");
+        assert!(config.document.get("cable").is_some_and(|c| c.is_array_of_tables()), "{saved:?}");
+        assert_eq!(hardware_counts(&parse_config("").unwrap()), (5, 5), "a new file");
+
+        let strip = |id: &str| SavedStrip {
+            id: id.into(),
+            key: String::new(),
+            label: String::new(),
+            params: Default::default(),
+            routes: Vec::new(),
+            device: String::new(),
+            exclusive: false,
+        };
+        let mixer = SavedMixer { strips: (1..=300).map(|n| strip(&format!("H{n}"))).collect(), buses: Vec::new() };
+        let config = parse_config(&set_mixer_entries("", &mixer).unwrap()).unwrap();
+        assert_eq!(hardware_counts(&config), (300, 0), "any number of them");
 
         let strips = "[[strip]]\nid = \"H300\"\n\n[[strip]]\nid = \"V300\"\n\n[[strip]]\nid = \"H01\"\n";
         let ids: Vec<String> = config_mixer(&parse_config(strips).unwrap()).strips.into_iter().map(|s| s.id).collect();

@@ -87,14 +87,12 @@ The service runs as LocalSystem. Physical devices chosen by name are machine-wid
 
 ## Configuration
 
-Settings are in `config.toml` in the settings folder: `%LOCALAPPDATA%\Lemon Mix` on demand, or `%ProgramData%\Lemon Mix` for the service (**Options > Open settings folder**). The application writes the `[[cable]]`, `[[strip]]` and `[[bus]]` tables and the `hardware_inputs` and `hardware_outputs` counts; everything else, comments included, is left as you wrote it.
+Settings are in `config.toml` in the settings folder: `%LOCALAPPDATA%\Lemon Mix` on demand, or `%ProgramData%\Lemon Mix` for the service (**Options > Open settings folder**). The application writes the `[[cable]]`, `[[strip]]` and `[[bus]]` tables; everything else, comments included, is left as you wrote it.
 
 ```toml
 listen = "127.0.0.1:3241"
 latency_ms = 20
 buffer_ms = 20
-hardware_inputs = 5
-hardware_outputs = 5
 diagnostics = false
 stall_test_ms = 0
 
@@ -134,11 +132,10 @@ limiter = -1.0
 | `listen` | Address of the local USB/IP server. It differs from the usual 3240, so another USB/IP server can run beside Lemon Mix. | `"127.0.0.1:3241"` |
 | `latency_ms` | Delay between a virtual input's playback side and the mixer, 1-1000 ms. Windows sends playback about 10 ms ahead; this is how late, after a system stall, playback can still arrive in time. | `20` |
 | `buffer_ms` | Audio kept between each physical device and the mixer, 5-200 ms. Raise it if hardware inputs or outputs crackle. | `20` |
-| `hardware_inputs`, `hardware_outputs` | Hardware strips and hardware buses, 0 or more each. The application updates them when strips or buses are added or removed in the window. | `5` |
 | `diagnostics` | Detailed USB/IP traces in the log. | `false` |
 | `stall_test_ms` | For troubleshooting: once a minute, hold every audio transfer and the mixer this long, to reproduce a system stall. 0-10000; 0 is off. | `0` |
 | `[[cable]]` | One table per virtual device, up to 32. `serial` is its identity in Windows; `id` (1-255) sets its USB product ID and bus ID; `kind` is `input`, `output` or `loopback` (the default for tables without one). | none |
-| `[[strip]]`, `[[bus]]` | The mixer's settings by ID: `H1`... hardware strips, `V<cable id>` virtual inputs, `A1`... hardware buses, `B<cable id>` virtual buses. `device` is `""` (none), `"default"` or a WASAPI endpoint ID. | written by the app |
+| `[[strip]]`, `[[bus]]` | The mixer's settings by ID: `H1`... hardware strips, `V<cable id>` virtual inputs, `A1`... hardware buses, `B<cable id>` virtual buses. There are as many hardware strips and buses as tables for them, five of each in a new file; with none, the app writes `strip = []` or `bus = []`. `device` is `""` (none), `"default"` or a WASAPI endpoint ID. A hardware strip's `device` may also be `"bus:<key>"`, to take that bus's output. | written by the app |
 
 Invalid values fall back to their defaults and the log says so. If the file is not valid TOML, the application starts with the defaults and does not overwrite the file until it is fixed.
 

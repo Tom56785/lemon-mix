@@ -32,8 +32,8 @@ use clap::Parser;
 
 use crate::cli::Cli;
 use crate::config::{
-    Cable, Config, DEFAULT_BUFFER_MS, DEFAULT_HARDWARE_PORTS, DEFAULT_LATENCY_MS, DEFAULT_LISTEN, MAX_BUFFER_MS,
-    MAX_CABLES, MIN_BUFFER_MS, config_bool, config_cables, config_int, config_mixer, config_string, ensure_config_file,
+    Cable, Config, DEFAULT_BUFFER_MS, DEFAULT_LATENCY_MS, DEFAULT_LISTEN, MAX_BUFFER_MS, MAX_CABLES, MIN_BUFFER_MS,
+    config_bool, config_cables, config_int, config_mixer, config_string, ensure_config_file, hardware_counts,
     load_config_content, numbered_cables, parse_config,
 };
 use crate::mixer::{HostSettings, MANUFACTURER, MixerHost};
@@ -289,16 +289,8 @@ fn host_settings(cli: &Cli, config: &Config, logger: &Logger) -> HostSettings {
         );
         buffer_ms = DEFAULT_BUFFER_MS;
     }
-    let ports = |key: &str| {
-        let count = config_int(config, key, DEFAULT_HARDWARE_PORTS);
-        if count >= 0 {
-            count as usize
-        } else {
-            logf!(logger, "Invalid {key} {count} (must be 0 or more); falling back to {DEFAULT_HARDWARE_PORTS}");
-            DEFAULT_HARDWARE_PORTS as usize
-        }
-    };
-    let (hardware_inputs, hardware_outputs) = (ports("hardware_inputs"), ports("hardware_outputs"));
+    // As many hardware strips and buses as config.toml has tables for.
+    let (hardware_inputs, hardware_outputs) = hardware_counts(config);
 
     let mut stall_test_ms = cli.stall_test_ms.unwrap_or_else(|| config_int(config, "stall_test_ms", 0));
     if !(0..=MAX_STALL_TEST_MS).contains(&stall_test_ms) {
@@ -488,6 +480,7 @@ fn new_application_logger(fresh: bool) -> (Logger, Option<LogCloser>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_HARDWARE_PORTS;
 
     #[test]
     fn application_log_starts_fresh() {
@@ -549,10 +542,24 @@ mod tests {
 
     #[test]
     fn invalid_settings_fall_back() {
-        let config =
-            parse_config("latency_ms = 0\nbuffer_ms = 1000\nhardware_inputs = -1\nhardware_outputs = 30\n").unwrap();
+        let config = parse_config("latency_ms = 0\nbuffer_ms = 1000\n").unwrap();
         let settings = host_settings(&Cli::default(), &config, &Logger::discard());
         assert_eq!((settings.latency_ms, settings.buffer_ms), (DEFAULT_LATENCY_MS, DEFAULT_BUFFER_MS));
-        assert_eq!((settings.hardware_inputs, settings.hardware_outputs), (DEFAULT_HARDWARE_PORTS as usize, 30));
+        let defaults = DEFAULT_HARDWARE_PORTS as usize;
+        assert_eq!((settings.hardware_inputs, settings.hardware_outputs), (defaults, defaults), "a new file");
+    }
+
+    #[test]
+    fn hardware_strips_and_buses_are_counted_from_their_tables() {
+        let counts = |content: &str| {
+            let settings = host_settings(&Cli::default(), &parse_config(content).unwrap(), &Logger::discard());
+            (settings.hardware_inputs, settings.hardware_outputs)
+        };
+        // Up to the highest numbered table; the old count settings are ignored.
+        let tables = "hardware_inputs = 9\n[[strip]]\nid = \"H1\"\n[[strip]]\nid = \"H3\"\n[[strip]]\nid = \"V2\"\n\
+                      [[bus]]\nid = \"B2\"\n";
+        assert_eq!(counts(tables), (3, 0));
+        // An empty list is none; no list at all is a new file.
+        assert_eq!(counts("strip = []\n"), (0, DEFAULT_HARDWARE_PORTS as usize));
     }
 }

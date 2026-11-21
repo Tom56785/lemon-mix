@@ -820,11 +820,10 @@ impl MixerHost {
         Ok(())
     }
 
-    /// The settings to save, with the number of hardware strips and buses.
+    /// The settings to save: a table for every strip and bus, which is also
+    /// how many hardware ones there are.
     pub fn saved_mixer(&self) -> SavedMixer {
-        let mixer = lock(&self.mixer);
-        let hardware = (lock(&self.inputs).len(), lock(&self.outputs).len());
-        SavedMixer { hardware: Some(hardware), ..mixer.saved.clone() }
+        lock(&self.mixer).saved.clone()
     }
 
     /// Adds a hardware strip (`strip`) or bus after the last one, with no
@@ -1182,6 +1181,15 @@ mod tests {
         }
     }
 
+    /// How many hardware strips and buses the saved settings have tables for.
+    fn hardware_tables(saved: &SavedMixer) -> (usize, usize) {
+        let count = |ids: Vec<&String>, letter| ids.iter().filter(|id| id.starts_with(letter)).count();
+        (
+            count(saved.strips.iter().map(|s| &s.id).collect(), 'H'),
+            count(saved.buses.iter().map(|b| &b.id).collect(), 'A'),
+        )
+    }
+
     fn cable(id: u32, kind: CableKind) -> Cable {
         Cable { id, serial: format!("S{id}"), name: format!("C{id}"), kind }
     }
@@ -1234,7 +1242,7 @@ mod tests {
         assert_eq!(strips, ["H1", "H2", "H3", "V1"]);
         assert_eq!(buses.len(), 72);
         assert_eq!(buses[71], "A72", "past the 64 buses a bit mask could hold");
-        assert_eq!(host.saved_mixer().hardware, Some((3, 72)));
+        assert_eq!(hardware_tables(&host.saved_mixer()), (3, 72));
 
         // H3 sends to A72 and A3, and has a label.
         host.command(&MixerCommand::Route { strip: "H3".into(), bus: "A72".into(), on: true }).unwrap();
@@ -1250,7 +1258,7 @@ mod tests {
         let (views, _) = host.views();
         assert_eq!(views[1].label, "Mic");
         assert_eq!(views[1].routes, ["A1", "A71"], "the route to A3 went with it");
-        assert_eq!(host.saved_mixer().hardware, Some((2, 71)));
+        assert_eq!(hardware_tables(&host.saved_mixer()), (2, 71));
         assert_eq!(lock(&host.inputs)[1].label(), "H2", "the log follows the new numbers");
 
         // A new strip starts afresh, and a cable's strip goes with its cable.
