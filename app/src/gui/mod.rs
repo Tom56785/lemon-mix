@@ -612,7 +612,7 @@ impl App {
                     })
                     .collect();
                 if let Some((endpoint, exclusive)) =
-                    widgets::device_picker(ui, &strip.id, port, &self.capture_devices, &buses)
+                    widgets::device_picker(ui, &strip.id, port, &self.capture_devices, "Recording devices", &buses)
                 {
                     if let Some(p) = &mut self.strips[index].port {
                         (p.endpoint, p.exclusive) = (endpoint.clone(), exclusive);
@@ -698,7 +698,7 @@ impl App {
             }
             if let Some(port) = &bus.port {
                 if let Some((endpoint, exclusive)) =
-                    widgets::device_picker(ui, &bus.id, port, &self.render_devices, &[])
+                    widgets::device_picker(ui, &bus.id, port, &self.render_devices, "Playback devices", &[])
                 {
                     if let Some(p) = &mut self.buses[index].port {
                         (p.endpoint, p.exclusive) = (endpoint.clone(), exclusive);

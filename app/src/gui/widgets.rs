@@ -64,6 +64,7 @@ pub fn device_picker(
     id: &str,
     port: &PortView,
     devices: &[DeviceView],
+    heading: &str,
     buses: &[(String, String)],
 ) -> Option<(String, bool)> {
     let mut endpoint = port.endpoint.clone();
@@ -93,6 +94,9 @@ pub fn device_picker(
                 default.unwrap_or("Default device".into()),
             );
             ui.separator();
+            if !devices.is_empty() {
+                ui.label(RichText::new(heading).small().color(Color32::GRAY));
+            }
             for device in devices {
                 ui.selectable_value(&mut endpoint, device.id.clone(), &device.name);
             }
