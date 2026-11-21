@@ -30,9 +30,9 @@ pub const DEFAULT_LATENCY_MS: i64 = 20;
 pub const DEFAULT_BUFFER_MS: i64 = 20;
 pub const MIN_BUFFER_MS: i64 = 5;
 pub const MAX_BUFFER_MS: i64 = 200;
-/// Hardware strips and buses, as in the classic five-in, five-out layout.
+/// Hardware strips and buses to start with, as in the classic five-in, five-out
+/// layout. There is no maximum: more can be added in the window.
 pub const DEFAULT_HARDWARE_PORTS: i64 = 5;
-pub const MAX_HARDWARE_PORTS: i64 = 8;
 
 /// The file name of the configuration.
 pub const CONFIG_FILE: &str = "config.toml";
@@ -297,7 +297,8 @@ pub fn default_config_content() -> String {
         format!("# Audio kept between each physical device and the mixer, {MIN_BUFFER_MS}-{MAX_BUFFER_MS} ms."),
         "# Raise it if hardware inputs or outputs crackle.".to_string(),
         format!("buffer_ms = {DEFAULT_BUFFER_MS}"),
-        format!("# Hardware input strips and hardware output buses (A), 1-{MAX_HARDWARE_PORTS} each."),
+        "# Hardware input strips and hardware output buses (A). The application".to_string(),
+        "# updates these when strips or buses are added or removed in the window.".to_string(),
         format!("hardware_inputs = {DEFAULT_HARDWARE_PORTS}"),
         format!("hardware_outputs = {DEFAULT_HARDWARE_PORTS}"),
         "# Detailed USB/IP traces in the log, for troubleshooting.".to_string(),
@@ -417,6 +418,10 @@ pub struct SavedBus {
 pub struct SavedMixer {
     pub strips: Vec<SavedStrip>,
     pub buses: Vec<SavedBus>,
+    /// How many hardware strips and buses there are, written to
+    /// `hardware_inputs` and `hardware_outputs` when set. Reading the file
+    /// leaves it unset: the counts are settings, read with the others.
+    pub hardware: Option<(usize, usize)>,
 }
 
 fn float(table: &Table, key: &str, fallback: f32) -> f32 {
@@ -436,12 +441,16 @@ fn text(table: &Table, key: &str) -> String {
     table.get(key).and_then(Item::as_str).unwrap_or_default().trim().to_string()
 }
 
-/// Whether `id` names a strip or bus: a letter and a number.
+/// Whether `id` names a strip or bus: a letter and a number, up to the
+/// largest cable ID for a cable's (`V`, `B`), and any for hardware (`H`, `A`).
 fn is_valid_port_id(id: &str, letters: &[char]) -> bool {
     let mut chars = id.chars();
-    chars.next().is_some_and(|c| letters.contains(&c))
-        && !chars.as_str().is_empty()
-        && chars.as_str().parse::<u32>().is_ok_and(|n| (1..=255).contains(&n))
+    let Some(letter) = chars.next().filter(|c| letters.contains(c)) else {
+        return false;
+    };
+    let digits = chars.as_str();
+    let max = if matches!(letter, 'V' | 'B') { MAX_CABLE_ID } else { u32::MAX };
+    !digits.starts_with('0') && digits.parse::<u32>().is_ok_and(|n| (1..=max).contains(&n))
 }
 
 /// The [[strip]] and [[bus]] tables. Invalid tables, repeated IDs and values
@@ -472,7 +481,6 @@ pub fn config_mixer(config: &Config) -> SavedMixer {
                 solo: boolean(table, "solo"),
                 mono: boolean(table, "mono"),
                 pan: float(table, "pan", 0.0),
-                routes: 0,
                 eq,
                 gate: float(table, "gate", 0.0),
                 comp: float(table, "comp", 0.0),
@@ -596,7 +604,26 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
         .collect();
     replace_tables(&mut document, STRIP_KEY, strips);
     replace_tables(&mut document, BUS_KEY, buses);
+    if let Some((inputs, outputs)) = mixer.hardware {
+        set_integer(&mut document, "hardware_inputs", inputs as i64);
+        set_integer(&mut document, "hardware_outputs", outputs as i64);
+    }
     Ok(keep_line_endings(content, document.to_string()))
+}
+
+/// Sets a top-level integer setting, keeping its place and its comments.
+fn set_integer(document: &mut DocumentMut, key: &str, number: i64) {
+    match document.get_mut(key).and_then(Item::as_value_mut) {
+        Some(existing) if existing.as_integer() == Some(number) => {}
+        Some(existing) => {
+            let decor = existing.decor().clone();
+            *existing = number.into();
+            *existing.decor_mut() = decor;
+        }
+        None => {
+            document.insert(key, value(number));
+        }
+    }
 }
 
 pub fn save_mixer(mixer: &SavedMixer) -> io::Result<()> {
@@ -716,6 +743,7 @@ pub(crate) mod tests {
                 device: "{0.0.0.00000000}.{abc}".into(),
                 exclusive: true,
             }],
+            hardware: None,
         };
         save_mixer(&mixer).unwrap();
         let saved = fs::read_to_string(config_file_path()).unwrap();
@@ -727,6 +755,25 @@ pub(crate) mod tests {
         let config = parse_config(&saved).unwrap();
         assert_eq!(config_cables(&config), cables);
         assert_eq!(config_mixer(&config), mixer);
+    }
+
+    /// Adding and removing hardware strips and buses rewrites their counts in
+    /// place, comments and all; any number of them can be saved.
+    #[test]
+    fn hardware_counts_are_saved_in_place() {
+        let content = "# inputs\nhardware_inputs = 5 # five\nlisten = \"x\"\n\n[[cable]]\nid = 1\n";
+        let mixer = SavedMixer { hardware: Some((300, 2)), ..Default::default() };
+        let saved = set_mixer_entries(content, &mixer).unwrap();
+        assert!(saved.starts_with("# inputs\nhardware_inputs = 300 # five\nlisten = \"x\"\n"), "{saved:?}");
+        let config = parse_config(&saved).unwrap();
+        assert_eq!((config_int(&config, "hardware_inputs", 0), config_int(&config, "hardware_outputs", 0)), (300, 2));
+        assert_eq!(config_cables(&config).len(), 0, "the new key did not land in a table");
+        assert!(config.document.get("cable").is_some());
+        assert_eq!(set_mixer_entries(content, &SavedMixer::default()).unwrap().matches("hardware_").count(), 1);
+
+        let strips = "[[strip]]\nid = \"H300\"\n\n[[strip]]\nid = \"V300\"\n\n[[strip]]\nid = \"H01\"\n";
+        let ids: Vec<String> = config_mixer(&parse_config(strips).unwrap()).strips.into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, ["H300"], "hardware strips have no maximum; cable IDs stop at {MAX_CABLE_ID}");
     }
 
     #[test]

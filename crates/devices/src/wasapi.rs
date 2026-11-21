@@ -388,7 +388,7 @@ pub(crate) fn run_stream(port: &PortShared, choice: &DeviceChoice, generation: u
     logf!(
         port.logger,
         "DEVICE {} opened \"{name}\" ({}, {} mode, buffer {} frames)",
-        port.label,
+        port.label(),
         stream.format.describe(),
         if stream.exclusive { "exclusive" } else { "shared" },
         stream.buffer_frames
@@ -404,8 +404,8 @@ pub(crate) fn run_stream(port: &PortShared, choice: &DeviceChoice, generation: u
         let _ = stream.client.Stop();
     }
     match &result {
-        Ok(()) => logf!(port.logger, "DEVICE {} closed \"{name}\"", port.label),
-        Err(err) => logf!(port.logger, "DEVICE {} lost \"{name}\": {err}", port.label),
+        Ok(()) => logf!(port.logger, "DEVICE {} closed \"{name}\"", port.label()),
+        Err(err) => logf!(port.logger, "DEVICE {} lost \"{name}\": {err}", port.label()),
     }
     result.map_err(|err| format!("{name}: {err}"))
 }

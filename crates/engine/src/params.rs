@@ -23,9 +23,6 @@ pub struct StripParams {
     pub mono: bool,
     /// Balance, from -1 (left) to 1 (right). The centre leaves both at unity.
     pub pan: f32,
-    /// The buses this strip feeds, by bus index in the engine's topology.
-    #[serde(skip)]
-    pub routes: u64,
     /// Bass, mid and treble, in dB.
     pub eq: [f32; 3],
     /// Noise gate amount, 0 (off) to 10.
@@ -42,7 +39,6 @@ impl Default for StripParams {
             solo: false,
             mono: false,
             pan: 0.0,
-            routes: 0,
             eq: [0.0; 3],
             gate: 0.0,
             comp: 0.0,

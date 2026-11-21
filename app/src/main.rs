@@ -29,8 +29,8 @@ use clap::Parser;
 use crate::cli::Cli;
 use crate::config::{
     Cable, Config, DEFAULT_BUFFER_MS, DEFAULT_HARDWARE_PORTS, DEFAULT_LATENCY_MS, DEFAULT_LISTEN, MAX_BUFFER_MS,
-    MAX_CABLES, MAX_HARDWARE_PORTS, MIN_BUFFER_MS, config_bool, config_cables, config_int, config_mixer, config_string,
-    ensure_config_file, load_config_content, numbered_cables, parse_config,
+    MAX_CABLES, MIN_BUFFER_MS, config_bool, config_cables, config_int, config_mixer, config_string, ensure_config_file,
+    load_config_content, numbered_cables, parse_config,
 };
 use crate::mixer::{HostSettings, MANUFACTURER, MixerHost};
 
@@ -265,13 +265,10 @@ fn host_settings(cli: &Cli, config: &Config, logger: &Logger) -> HostSettings {
     }
     let ports = |key: &str| {
         let count = config_int(config, key, DEFAULT_HARDWARE_PORTS);
-        if (1..=MAX_HARDWARE_PORTS).contains(&count) {
+        if count >= 0 {
             count as usize
         } else {
-            logf!(
-                logger,
-                "Invalid {key} {count} (must be 1-{MAX_HARDWARE_PORTS}); falling back to {DEFAULT_HARDWARE_PORTS}"
-            );
+            logf!(logger, "Invalid {key} {count} (must be 0 or more); falling back to {DEFAULT_HARDWARE_PORTS}");
             DEFAULT_HARDWARE_PORTS as usize
         }
     };
@@ -527,9 +524,9 @@ mod tests {
     #[test]
     fn invalid_settings_fall_back() {
         let config =
-            parse_config("latency_ms = 0\nbuffer_ms = 1000\nhardware_inputs = 0\nhardware_outputs = 3\n").unwrap();
+            parse_config("latency_ms = 0\nbuffer_ms = 1000\nhardware_inputs = -1\nhardware_outputs = 30\n").unwrap();
         let settings = host_settings(&Cli::default(), &config, &Logger::discard());
         assert_eq!((settings.latency_ms, settings.buffer_ms), (DEFAULT_LATENCY_MS, DEFAULT_BUFFER_MS));
-        assert_eq!((settings.hardware_inputs, settings.hardware_outputs), (DEFAULT_HARDWARE_PORTS as usize, 3));
+        assert_eq!((settings.hardware_inputs, settings.hardware_outputs), (DEFAULT_HARDWARE_PORTS as usize, 30));
     }
 }

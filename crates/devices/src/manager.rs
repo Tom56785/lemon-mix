@@ -74,7 +74,8 @@ pub struct PortStatus {
 }
 
 pub(crate) struct PortShared {
-    pub label: String,
+    /// The strip or bus this port belongs to, for the log.
+    label: Mutex<String>,
     pub direction: Direction,
     pub capture: Option<Arc<CapturePort>>,
     pub render: Option<Arc<RenderPort>>,
@@ -93,6 +94,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl PortShared {
+    pub fn label(&self) -> String {
+        lock(&self.label).clone()
+    }
+
     pub fn stats(&self) -> &crate::port::PortStats {
         match (&self.capture, &self.render) {
             (Some(capture), _) => &capture.stats,
@@ -150,8 +155,14 @@ impl PortHandle {
         lock(&self.shared.status).clone()
     }
 
-    pub fn label(&self) -> &str {
-        &self.shared.label
+    pub fn label(&self) -> String {
+        self.shared.label()
+    }
+
+    /// Renames the port in the log, as when the strips after a removed one
+    /// move up.
+    pub fn set_label(&self, label: &str) {
+        *lock(&self.shared.label) = label.to_string();
     }
 }
 
@@ -206,7 +217,7 @@ impl DeviceManager {
 
     fn port(&self, label: &str, direction: Direction) -> PortHandle {
         let shared = Arc::new(PortShared {
-            label: label.to_string(),
+            label: Mutex::new(label.to_string()),
             direction,
             capture: (direction == Direction::Capture).then(|| CapturePort::new(self.buffer_ms)),
             render: (direction == Direction::Render).then(|| RenderPort::new(self.buffer_ms)),
@@ -293,7 +304,7 @@ fn supervise(port: &PortShared) {
                 port.stats().set_state(PortState::Failed);
                 let mut status = lock(&port.status);
                 if status.error != err {
-                    logf!(port.logger, "DEVICE {} could not stream: {err}", port.label);
+                    logf!(port.logger, "DEVICE {} could not stream: {err}", port.label());
                 }
                 status.error = err;
                 status.device_name.clear();

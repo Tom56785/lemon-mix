@@ -38,10 +38,6 @@ fn samples(packet: &[u8]) -> Vec<i32> {
     packet.as_chunks::<3>().0.iter().map(|b| decode_int24(b[0], b[1], b[2])).collect()
 }
 
-fn routed(buses: &[usize]) -> StripParams {
-    StripParams { routes: buses.iter().fold(0, |mask, &b| mask | 1 << b), ..Default::default() }
-}
-
 struct Rig {
     engine: Arc<Engine>,
     cables: Vec<Arc<EngineCable>>,
@@ -61,7 +57,8 @@ fn rig(inputs: usize, outputs: usize, routes: &[&[usize]]) -> Rig {
                 line: Arc::clone(cable.input.as_ref().unwrap()),
                 playback_active: Arc::clone(&cable.playback_active),
             },
-            params: routed(routes.get(i).copied().unwrap_or(&[])),
+            params: StripParams::default(),
+            routes: routes.get(i).copied().unwrap_or(&[]).to_vec(),
         });
         cables.push(cable);
     }
@@ -102,7 +99,8 @@ fn unity_single_route_is_bit_exact() {
                 line: Arc::clone(cable.input.as_ref().unwrap()),
                 playback_active: Arc::clone(&cable.playback_active),
             },
-            params: routed(&[0]),
+            params: StripParams::default(),
+            routes: vec![0],
         }],
         // A second, silent bus and a muted second strip must not disturb it.
         buses: vec![BusSpec { sink: BusSink::Virtual(ring), params: BusParams::default() }],
@@ -157,7 +155,7 @@ fn routing_matrix_and_solo() {
     play(2000);
     assert_eq!([first(&buses[0], 2000), first(&buses[1], 2000), first(&buses[2], 2000)], [100, 20, 120]);
     // Solo strip 1: strip 0 fades out over the next frame and stays out.
-    rig.engine.set_strip(1, StripParams { solo: true, ..routed(&[1, 2]) });
+    rig.engine.set_strip(1, StripParams { solo: true, ..Default::default() });
     play(2001);
     play(2002);
     assert_eq!(first(&buses[2], 2001), 20, "the ramp ends at the target");
@@ -174,7 +172,7 @@ fn gain_changes_ramp_across_a_frame() {
         input.write_playback(frame, &mut [constant_packet(value).as_slice()].into_iter());
     }
     assert!(samples(&capture(bus, 3000 + LATENCY)).iter().all(|&s| s == value));
-    rig.engine.set_strip(0, StripParams { gain_db: -6.0, ..routed(&[0]) });
+    rig.engine.set_strip(0, StripParams { gain_db: -6.0, ..Default::default() });
     let ramped = samples(&capture(bus, 3001 + LATENCY));
     let target = db_to_gain(-6.0);
     for i in 0..FRAME_SAMPLES {
@@ -238,9 +236,10 @@ fn hardware_strips_and_buses() {
         strips: vec![
             StripSpec {
                 source: StripSource::Hardware(Some(Arc::new(TestInput(tone)))),
-                params: StripParams { pan: -1.0, ..routed(&[0]) },
+                params: StripParams { pan: -1.0, ..Default::default() },
+                routes: vec![0],
             },
-            StripSpec { source: StripSource::Hardware(None), params: routed(&[0]) },
+            StripSpec { source: StripSource::Hardware(None), params: StripParams::default(), routes: vec![0] },
         ],
         buses: vec![
             BusSpec {
@@ -255,9 +254,9 @@ fn hardware_strips_and_buses() {
     let frames = output.0.lock().unwrap().clone();
     assert_eq!(frames.len(), 5, "the first call processes one frame, then every frame up to the last");
     assert!(frames.iter().all(|f| f.as_chunks::<2>().0.iter().all(|p| *p == [0.5, 0.0])), "panned hard left");
-    let meter = engine.meters.strips[0].take();
+    let meter = engine.meters().strips[0].take();
     assert_eq!(meter.peak, [0.5, 0.25]);
-    assert_eq!(engine.meters.buses[0].take().peak, [0.5, 0.0]);
+    assert_eq!(engine.meters().buses[0].take().peak, [0.5, 0.0]);
 }
 
 #[test]
@@ -300,7 +299,7 @@ fn feature_units_apply_on_their_own_side() {
 #[test]
 fn processing_does_not_allocate() {
     let rig = rig(4, 4, &[&[0, 1], &[1, 2], &[2, 3], &[0, 3]]);
-    rig.engine.set_strip(0, StripParams { eq: [3.0, -2.0, 1.0], gate: 2.0, comp: 4.0, ..routed(&[0, 1]) });
+    rig.engine.set_strip(0, StripParams { eq: [3.0, -2.0, 1.0], gate: 2.0, comp: 4.0, ..Default::default() });
     rig.engine.set_bus(1, BusParams { limiter: Some(-3.0), mono: true, ..Default::default() });
     rig.engine.process_until(7000); // applies the commands and layout
     let before = crate::alloc_counter::allocations();
@@ -312,4 +311,25 @@ fn processing_does_not_allocate() {
 fn stray_frame_bytes_constant() {
     assert_eq!(FRAME_BYTES * FRAME_SAMPLES, PACKET_BYTES);
     let _unused = AtomicBool::new(false);
+}
+
+/// There is no fixed number of strips or buses: a strip reaches a bus far
+/// past 64, routes change by command, and every strip and bus has a meter.
+#[test]
+fn any_number_of_strips_and_buses() {
+    let rig = rig(1, 100, &[&[]]);
+    let (input, far) = (&rig.cables[0], &rig.cables[91]);
+    let value = 0x12_3456;
+    input.write_playback(8000, &mut [constant_packet(value).as_slice()].into_iter());
+    assert!(samples(&capture(far, 8000 + LATENCY)).iter().all(|&s| s == 0), "not routed yet");
+    rig.engine.set_route(0, 90, true);
+    for frame in 8001..8003 {
+        input.write_playback(frame, &mut [constant_packet(value).as_slice()].into_iter());
+    }
+    capture(far, 8001 + LATENCY); // the send fades in across this frame
+    assert!(samples(&capture(far, 8002 + LATENCY)).iter().all(|&s| s == value));
+    let meters = rig.engine.meters();
+    assert_eq!((meters.strips.len(), meters.buses.len()), (1, 100));
+    assert!(meters.buses[90].take().peak[0] > 0.0);
+    assert_eq!(meters.buses[89].take().peak, [0.0, 0.0]);
 }

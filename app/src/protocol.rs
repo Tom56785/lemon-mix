@@ -69,6 +69,19 @@ pub enum MixerCommand {
     },
     /// List the devices again.
     RefreshDevices,
+    /// Add a hardware input strip after the last one.
+    AddStrip,
+    /// Add a hardware output bus after the last one.
+    AddBus,
+    /// Remove a hardware strip (`H2`); the strips after it move up a number.
+    RemoveStrip {
+        id: String,
+    },
+    /// Remove a hardware bus (`A2`) and every route to it; the buses after it
+    /// move up a number.
+    RemoveBus {
+        id: String,
+    },
 }
 
 /// A physical device as the window shows it.
@@ -188,6 +201,8 @@ mod tests {
             Request::Mixer {
                 command: MixerCommand::Device { id: "A1".into(), endpoint: "default".into(), exclusive: true },
             },
+            Request::Mixer { command: MixerCommand::AddStrip },
+            Request::Mixer { command: MixerCommand::RemoveBus { id: "A12".into() } },
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();

@@ -3,10 +3,6 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Strips and buses the meter bank has room for. Slots are by index in the
-/// engine's topology, so the bank never has to grow while audio runs.
-pub const METER_SLOTS: usize = 128;
-
 /// One stereo meter. Peaks are the largest absolute sample since the last
 /// read; positive f32 values order like their bit patterns, so `fetch_max`
 /// on the bits keeps the largest. RMS is smoothed over about 300 ms.
@@ -57,18 +53,26 @@ impl Meter {
     }
 }
 
-/// The meters of every strip and bus.
+/// The meters of every strip and bus of one topology, by index. Each
+/// topology gets a bank of its own size, so the bank never grows while audio
+/// runs.
 pub struct MeterBank {
     pub strips: Vec<Meter>,
     pub buses: Vec<Meter>,
 }
 
-impl Default for MeterBank {
-    fn default() -> MeterBank {
-        MeterBank {
-            strips: (0..METER_SLOTS).map(|_| Meter::default()).collect(),
-            buses: (0..METER_SLOTS).map(|_| Meter::default()).collect(),
-        }
+impl MeterBank {
+    pub fn new(strips: usize, buses: usize) -> MeterBank {
+        let meters = |n: usize| {
+            (0..n)
+                .map(|_| {
+                    let meter = Meter::default();
+                    meter.clear();
+                    meter
+                })
+                .collect()
+        };
+        MeterBank { strips: meters(strips), buses: meters(buses) }
     }
 }
 

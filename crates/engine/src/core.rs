@@ -22,7 +22,7 @@ use cables::logging::Logger;
 use cables::usbip::busclock::current_bus_time;
 
 use crate::dsp::{Compressor, Eq3, Gate, Limiter, declick};
-use crate::meters::{METER_SLOTS, MeterBank, RmsFollower};
+use crate::meters::{MeterBank, RmsFollower};
 use crate::params::{BusParams, StripParams};
 use crate::ring::BusRing;
 use crate::{FRAME_LEN, Frame, decode_frame, encode_frame};
@@ -59,6 +59,8 @@ pub enum BusSink {
 pub struct StripSpec {
     pub source: StripSource,
     pub params: StripParams,
+    /// The buses this strip feeds, by index in the topology's buses.
+    pub routes: Vec<usize>,
 }
 
 pub struct BusSpec {
@@ -67,7 +69,7 @@ pub struct BusSpec {
 }
 
 /// The strips and buses, in the order the engine indexes them: strip routes
-/// and meter slots refer to these indices.
+/// and meters refer to these indices. There may be any number of each.
 #[derive(Default)]
 pub struct Topology {
     pub strips: Vec<StripSpec>,
@@ -82,17 +84,24 @@ pub enum Command {
     Strip(usize, StripParams),
     /// New settings for the bus at this index.
     Bus(usize, BusParams),
+    /// Connects (true) or disconnects the strip and the bus at these indices.
+    Route(usize, usize, bool),
 }
 
 /// The engine's working state for a topology, built off the audio path.
 pub struct Layout {
     strips: Vec<StripState>,
     buses: Vec<BusState>,
+    /// Sized for this layout's strips and buses.
+    meters: Arc<MeterBank>,
 }
 
 struct StripState {
     source: StripSource,
     params: StripParams,
+    /// Whether this strip feeds each bus, by bus index. Sized with the
+    /// layout, so routing changes never allocate.
+    routes: Vec<bool>,
     eq: Eq3,
     gate: Gate,
     comp: Compressor,
@@ -139,7 +148,8 @@ pub struct Engine {
     core: Mutex<Core>,
     commands: Sender<Command>,
     garbage: Mutex<Receiver<Box<Layout>>>,
-    pub meters: Arc<MeterBank>,
+    /// The meters of the latest topology.
+    meters: Mutex<Arc<MeterBank>>,
     pub stats: EngineStats,
 }
 
@@ -149,7 +159,6 @@ struct Core {
     garbage: Sender<Box<Layout>>,
     /// The next frame to process; `None` until the first.
     next: Option<u64>,
-    meters: Arc<MeterBank>,
     frame: Frame,
     packet: [u8; PACKET_BYTES],
 }
@@ -168,22 +177,28 @@ impl Engine {
     pub fn new() -> Engine {
         let (commands, receiver) = channel();
         let (garbage_tx, garbage_rx) = channel();
-        let meters = Arc::new(MeterBank::default());
+        let meters = Arc::new(MeterBank::new(0, 0));
         Engine {
             core: Mutex::new(Core {
-                layout: Box::new(Layout { strips: Vec::new(), buses: Vec::new() }),
+                layout: Box::new(Layout { strips: Vec::new(), buses: Vec::new(), meters: Arc::clone(&meters) }),
                 commands: receiver,
                 garbage: garbage_tx,
                 next: None,
-                meters: Arc::clone(&meters),
                 frame: [0.0; FRAME_LEN],
                 packet: [0; PACKET_BYTES],
             }),
             commands,
             garbage: Mutex::new(garbage_rx),
-            meters,
+            meters: Mutex::new(meters),
             stats: EngineStats::default(),
         }
+    }
+
+    /// The meters of the latest topology, by strip and bus index. A new
+    /// topology comes with new meters, which read silence until the engine
+    /// takes it up.
+    pub fn meters(&self) -> Arc<MeterBank> {
+        Arc::clone(&lock(&self.meters))
     }
 
     /// Replaces the strips and buses. The layout is built here, on the
@@ -194,12 +209,11 @@ impl Engine {
         for old in lock(&self.garbage).try_iter() {
             drop(old);
         }
-        let strips = topology.strips.len().min(METER_SLOTS);
-        let buses = topology.buses.len().min(METER_SLOTS).min(64);
+        let buses = topology.buses.len();
+        let meters = Arc::new(MeterBank::new(topology.strips.len(), buses));
         let bus_states: Vec<BusState> = topology
             .buses
             .into_iter()
-            .take(buses)
             .map(|spec| {
                 let params = spec.params.sanitized();
                 let mut limiter = Limiter::default();
@@ -217,11 +231,17 @@ impl Engine {
         let strip_states: Vec<StripState> = topology
             .strips
             .into_iter()
-            .take(strips)
             .map(|spec| {
+                let mut routes = vec![false; buses];
+                for bus in spec.routes {
+                    if let Some(route) = routes.get_mut(bus) {
+                        *route = true;
+                    }
+                }
                 let mut state = StripState {
                     source: spec.source,
                     params: StripParams::default(),
+                    routes,
                     eq: Eq3::default(),
                     gate: Gate::default(),
                     comp: Compressor::default(),
@@ -238,14 +258,19 @@ impl Engine {
                 state
             })
             .collect();
-        for meter in self.meters.strips.iter().chain(self.meters.buses.iter()) {
-            meter.clear();
-        }
-        let _ = self.commands.send(Command::Layout(Box::new(Layout { strips: strip_states, buses: bus_states })));
+        *lock(&self.meters) = Arc::clone(&meters);
+        let layout = Layout { strips: strip_states, buses: bus_states, meters };
+        let _ = self.commands.send(Command::Layout(Box::new(layout)));
     }
 
     pub fn set_strip(&self, index: usize, params: StripParams) {
         let _ = self.commands.send(Command::Strip(index, params.sanitized()));
+    }
+
+    /// Connects or disconnects strip `strip` and bus `bus`, by index; the
+    /// send fades in or out across the next frame.
+    pub fn set_route(&self, strip: usize, bus: usize, on: bool) {
+        let _ = self.commands.send(Command::Route(strip, bus, on));
     }
 
     pub fn set_bus(&self, index: usize, params: BusParams) {
@@ -365,7 +390,7 @@ impl StripState {
     /// The gains this strip should apply towards `bus`.
     fn params_target(&self, bus: usize, any_solo: bool) -> [f32; 2] {
         let p = &self.params;
-        let routed = bus < 64 && p.routes & (1 << bus) != 0;
+        let routed = self.routes.get(bus).copied().unwrap_or(false);
         if !routed || p.mute || (any_solo && !p.solo) { [0.0; 2] } else { p.channel_gains() }
     }
 }
@@ -389,13 +414,18 @@ impl Core {
                         bus.params = params;
                     }
                 }
+                Command::Route(strip, bus, on) => {
+                    if let Some(route) = self.layout.strips.get_mut(strip).and_then(|s| s.routes.get_mut(bus)) {
+                        *route = on;
+                    }
+                }
             }
         }
     }
 
     fn process_frame(&mut self, frame_number: u64) {
-        let Core { layout, frame, packet, meters, .. } = self;
-        let Layout { strips, buses } = &mut **layout;
+        let Core { layout, frame, packet, .. } = self;
+        let Layout { strips, buses, meters } = &mut **layout;
         for bus in buses.iter_mut() {
             bus.mix = [0.0; FRAME_LEN];
         }

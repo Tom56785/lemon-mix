@@ -6,8 +6,8 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 
 ## Features
 
-- **Input strips**: up to 8 hardware inputs (physical recording devices) and one virtual input per virtual input or loopback device.
-- **Output buses**: up to 8 hardware buses, A1 to A8 (physical playback devices), and one virtual bus, B1, B2, ..., per virtual output or loopback device.
+- **Input strips**: any number of hardware inputs (physical recording devices), added and removed in the window, and one virtual input per virtual input or loopback device.
+- **Output buses**: any number of hardware buses, A1, A2, ... (physical playback devices), added and removed in the window, and one virtual bus, B1, B2, ..., per virtual output or loopback device.
 - **Routing matrix**: any strip to any combination of buses, with a button per bus on every strip.
 - **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise gate and compressor, peak meters with gain-reduction display.
 - **Per bus**: fader, mute, mono, peak limiter, meters.
@@ -17,7 +17,7 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 - Runs on demand from its window (and the notification area), or as a Windows service from start-up.
 - Settings are saved as you change them, in a `config.toml` that keeps your own comments.
 
-The layout follows the classic five-in, five-out virtual mixer: five hardware inputs and five hardware buses by default, plus as many virtual inputs and outputs as you create.
+The layout follows the classic five-in, five-out virtual mixer: five hardware inputs and five hardware buses to start with, plus as many virtual inputs and outputs as you create. Add more hardware strips and buses with the **+ Input** and **+ Output** columns, and remove one with the **−** button beside its type; the ones after it move up a number, keeping their devices and settings.
 
 ## How it works
 
@@ -68,7 +68,7 @@ The service runs as LocalSystem. Physical devices chosen by name are machine-wid
 
 ## Configuration
 
-Settings are in `config.toml` in the settings folder: `%LOCALAPPDATA%\Lemon Mix` on demand, or `%ProgramData%\Lemon Mix` for the service (**Options > Open settings folder**). The application writes the `[[cable]]`, `[[strip]]` and `[[bus]]` tables; everything else, comments included, is left as you wrote it.
+Settings are in `config.toml` in the settings folder: `%LOCALAPPDATA%\Lemon Mix` on demand, or `%ProgramData%\Lemon Mix` for the service (**Options > Open settings folder**). The application writes the `[[cable]]`, `[[strip]]` and `[[bus]]` tables and the `hardware_inputs` and `hardware_outputs` counts; everything else, comments included, is left as you wrote it.
 
 ```toml
 listen = "127.0.0.1:3241"
@@ -115,7 +115,7 @@ limiter = -1.0
 | `listen` | Address of the local USB/IP server. It differs from the usual 3240, so another USB/IP server can run beside Lemon Mix. | `"127.0.0.1:3241"` |
 | `latency_ms` | Delay between a virtual input's playback side and the mixer, 1-1000 ms. Windows sends playback about 10 ms ahead; this is how late, after a system stall, playback can still arrive in time. | `20` |
 | `buffer_ms` | Audio kept between each physical device and the mixer, 5-200 ms. Raise it if hardware inputs or outputs crackle. | `20` |
-| `hardware_inputs`, `hardware_outputs` | Hardware strips and hardware buses, 1-8 each. | `5` |
+| `hardware_inputs`, `hardware_outputs` | Hardware strips and hardware buses, 0 or more each. The application updates them when strips or buses are added or removed in the window. | `5` |
 | `diagnostics` | Detailed USB/IP traces in the log. | `false` |
 | `stall_test_ms` | For troubleshooting: once a minute, hold every audio transfer and the mixer this long, to reproduce a system stall. 0-10000; 0 is off. | `0` |
 | `[[cable]]` | One table per virtual device, up to 32. `serial` is its identity in Windows; `id` (1-255) sets its USB product ID and bus ID; `kind` is `input`, `output` or `loopback` (the default for tables without one). | none |

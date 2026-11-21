@@ -131,6 +131,10 @@ enum Question {
     StartService,
     UninstallService,
     RemoveCable(CableView),
+    /// A hardware strip, by ID and label.
+    RemoveStrip(String, String),
+    /// A hardware bus, by ID and label.
+    RemoveBus(String, String),
 }
 
 struct App {
@@ -486,6 +490,9 @@ impl App {
                 for index in 0..self.strips.len() {
                     widgets::strip_frame(ui, |ui| self.strip_ui(ui, index));
                 }
+                if widgets::add_column(ui, "+ Input", "Add a hardware input strip") {
+                    self.send(Request::Mixer { command: MixerCommand::AddStrip });
+                }
             });
             ui.add_space(8.0);
             ui.separator();
@@ -493,6 +500,9 @@ impl App {
             ui.horizontal_top(|ui| {
                 for index in 0..self.buses.len() {
                     widgets::strip_frame(ui, |ui| self.bus_ui(ui, index));
+                }
+                if widgets::add_column(ui, "+ Output", "Add a hardware output bus") {
+                    self.send(Request::Mixer { command: MixerCommand::AddBus });
                 }
             });
         });
@@ -541,15 +551,33 @@ impl App {
         }
     }
 
+    /// The small grey line under a strip's or bus's name, with a remove
+    /// button for hardware ones. Returns whether it was clicked.
+    fn kind_line(&self, ui: &mut egui::Ui, kind: &str, removable: bool, hint: &str) -> bool {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(kind).small().color(Color32::GRAY));
+            removable
+                && ui
+                    .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add(egui::Button::new(RichText::new("\u{2212}").small()).small())
+                            .on_hover_text(hint)
+                            .clicked()
+                    })
+                    .inner
+        })
+        .inner
+    }
+
     fn strip_ui(&mut self, ui: &mut egui::Ui, index: usize) {
         let strip = self.strips[index].clone();
         let hardware = strip.port.is_some();
         ui.vertical(|ui| {
             ui.set_width(widgets::STRIP_WIDTH);
             self.label_ui(ui, &strip.id, &strip.label, hardware);
-            ui.label(
-                RichText::new(if hardware { "Hardware input" } else { "Virtual input" }).small().color(Color32::GRAY),
-            );
+            let kind = if hardware { "Hardware input" } else { "Virtual input" };
+            if self.kind_line(ui, kind, hardware, "Remove this input strip") {
+                self.question = Some(Question::RemoveStrip(strip.id.clone(), strip.label.clone()));
+            }
             if let Some(port) = &strip.port {
                 if let Some((endpoint, exclusive)) = widgets::device_picker(ui, &strip.id, port, &self.capture_devices)
                 {
@@ -632,7 +660,9 @@ impl App {
             } else {
                 format!("{short} \u{00b7} virtual output")
             };
-            ui.label(RichText::new(kind).small().color(Color32::GRAY));
+            if self.kind_line(ui, &kind, hardware, "Remove this output bus") {
+                self.question = Some(Question::RemoveBus(bus.id.clone(), bus.label.clone()));
+            }
             if let Some(port) = &bus.port {
                 if let Some((endpoint, exclusive)) = widgets::device_picker(ui, &bus.id, port, &self.render_devices) {
                     if let Some(p) = &mut self.buses[index].port {
@@ -834,6 +864,23 @@ impl App {
                 "Remove",
                 "Cancel",
             ),
+            Question::RemoveStrip(_, label) => (
+                "Remove input strip",
+                format!(
+                    "Remove the input strip \"{label}\"?\n\nIts device and settings are forgotten, and the input strips after it move up a number."
+                ),
+                "Remove",
+                "Cancel",
+            ),
+            Question::RemoveBus(_, label) => (
+                "Remove output bus",
+                format!(
+                    "Remove the output bus \"{label}\"?\n\nIts device and settings are forgotten, every input stops sending to it, \
+                     and the output buses after it move up a number."
+                ),
+                "Remove",
+                "Cancel",
+            ),
         };
         let mut answer = None;
         widgets::dialog(ctx, title, |ui| {
@@ -874,6 +921,14 @@ impl App {
                 run_job(shared, "Uninstalling the Windows service\u{2026}", shell::uninstall_service)
             }
             (Question::RemoveCable(cable), true) => self.send(Request::RemoveCable { serial: cable.serial }),
+            (Question::RemoveStrip(id, _), true) => {
+                self.send(Request::Mixer { command: MixerCommand::RemoveStrip { id } });
+                self.edited.clear();
+            }
+            (Question::RemoveBus(id, _), true) => {
+                self.send(Request::Mixer { command: MixerCommand::RemoveBus { id } });
+                self.edited.clear();
+            }
             _ => {}
         }
     }

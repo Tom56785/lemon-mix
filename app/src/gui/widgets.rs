@@ -35,6 +35,17 @@ pub fn strip_frame(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::group(ui.style()).fill(Color32::from_gray(32)).inner_margin(egui::Margin::same(6)).show(ui, content);
 }
 
+/// The column after the last strip or bus, with a button that adds one.
+/// Returns whether it was clicked.
+pub fn add_column(ui: &mut egui::Ui, text: &str, hint: &str) -> bool {
+    ui.vertical(|ui| {
+        ui.set_width(STRIP_WIDTH * 0.6);
+        ui.add_space(24.0);
+        ui.add_sized([STRIP_WIDTH * 0.6, 48.0], egui::Button::new(text)).on_hover_text(hint).clicked()
+    })
+    .inner
+}
+
 /// `text` shortened to `max` characters with an ellipsis.
 pub fn ellipsize(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
