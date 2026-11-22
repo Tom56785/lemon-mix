@@ -60,6 +60,7 @@ fn rig(inputs: usize, outputs: usize, routes: &[&[usize]]) -> Rig {
             params: StripParams::default(),
             routes: routes.get(i).copied().unwrap_or(&[]).to_vec(),
             duck_sources: Vec::new(),
+            identity: 0,
         });
         cables.push(cable);
     }
@@ -103,6 +104,7 @@ fn unity_single_route_is_bit_exact() {
             params: StripParams::default(),
             routes: vec![0],
             duck_sources: Vec::new(),
+            identity: 0,
         }],
         // A second, silent bus and a muted second strip must not disturb it.
         buses: vec![BusSpec { sink: BusSink::Virtual(ring), params: BusParams::default() }],
@@ -241,12 +243,14 @@ fn hardware_strips_and_buses() {
                 params: StripParams { pan: -1.0, ..Default::default() },
                 routes: vec![0],
                 duck_sources: Vec::new(),
+                identity: 0,
             },
             StripSpec {
                 source: StripSource::Hardware(None),
                 params: StripParams::default(),
                 routes: vec![0],
                 duck_sources: Vec::new(),
+                identity: 0,
             },
         ],
         buses: vec![
@@ -358,6 +362,7 @@ fn a_bus_feeds_a_strip_one_frame_later() {
                 params: StripParams::default(),
                 routes: vec![0],
                 duck_sources: Vec::new(),
+                identity: 0,
             },
             // Bus 0 comes back in here, and goes on to bus 1.
             StripSpec {
@@ -365,6 +370,7 @@ fn a_bus_feeds_a_strip_one_frame_later() {
                 params: StripParams::default(),
                 routes: vec![1],
                 duck_sources: Vec::new(),
+                identity: 0,
             },
         ],
         buses: vec![
@@ -409,12 +415,14 @@ fn ducking_rig(mic_routed: bool) -> (Arc<Engine>, Arc<TestOutput>, Arc<Mutex<f32
                 params: StripParams::default(),
                 routes: vec![0],
                 duck_sources: vec![1],
+                identity: 1,
             },
             StripSpec {
                 source: StripSource::Hardware(Some(Arc::new(SwitchedInput(Arc::clone(&mic))))),
                 params: StripParams::default(),
                 routes: if mic_routed { vec![0] } else { Vec::new() },
                 duck_sources: Vec::new(),
+                identity: 0,
             },
         ],
         buses: vec![BusSpec {
@@ -509,4 +517,59 @@ fn ducking_follows_what_is_heard() {
     run(&engine, 400);
     assert!((last_out(&output) - 0.8).abs() < 1e-3, "{}", last_out(&output));
     assert_eq!(engine.meters().strips[1].take().duck, 1.0);
+}
+
+/// A new layout (a device plugged in, a strip added) does not undo ducking:
+/// a strip that carries on keeps its moment, and is never heard jumping up.
+#[test]
+fn a_new_layout_keeps_a_strip_ducked() {
+    let engine = Arc::new(Engine::new());
+    let output = Arc::new(TestOutput::default());
+    let mic = Arc::new(Mutex::new(0.3f32));
+    let topology = |identities: [u64; 2]| Topology {
+        strips: vec![
+            StripSpec {
+                source: StripSource::Hardware(Some(Arc::new(TestInput([0.5; FRAME_LEN])))),
+                params: StripParams::default(),
+                routes: vec![0],
+                duck_sources: vec![1],
+                identity: identities[0],
+            },
+            StripSpec {
+                source: StripSource::Hardware(Some(Arc::new(SwitchedInput(Arc::clone(&mic))))),
+                params: StripParams::default(),
+                routes: Vec::new(),
+                duck_sources: Vec::new(),
+                identity: identities[1],
+            },
+        ],
+        buses: vec![BusSpec {
+            sink: BusSink::Hardware(Some(Arc::clone(&output) as Arc<dyn OutputPort>)),
+            params: BusParams::default(),
+        }],
+    };
+    let mut frame = 40_000;
+    let mut run = |frames: u64| {
+        for _ in 0..frames.div_ceil(50) {
+            frame += 50;
+            engine.process_until(frame);
+        }
+    };
+    engine.set_topology(topology([7, 8]));
+    run(200);
+    let floor = 0.5 * db_to_gain(-12.0);
+    assert!((last_out(&output) - floor).abs() < 0.002, "ducked: {}", last_out(&output));
+
+    output.0.lock().unwrap().clear();
+    engine.set_topology(topology([7, 8]));
+    run(100);
+    let loudest = output.0.lock().unwrap().iter().flatten().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(loudest < floor + 0.002, "it jumped up to {loudest} in the new layout");
+
+    // Strips the engine cannot tell apart (identity 0) start afresh, as before.
+    output.0.lock().unwrap().clear();
+    engine.set_topology(topology([0, 0]));
+    run(1);
+    let first = output.0.lock().unwrap().first().map_or(0.0, |f| f[FRAME_LEN - 1]);
+    assert!((first - 0.5).abs() < 1e-3, "a fresh strip starts unducked: {first}");
 }

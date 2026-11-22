@@ -183,9 +183,10 @@ struct App {
     renaming: Option<(String, String)>,
     /// The profiles dialog, while it is open.
     profile_dialog: Option<ProfileDialog>,
-    /// The strip whose ducking dialog is open.
+    /// The strip whose ducking dialog is open, by its key: an ID shifts when
+    /// an earlier strip is removed, and the dialog must stay on its strip.
     duck_dialog: Option<String>,
-    /// The strip and processor whose options dialog is open.
+    /// The strip (by key) and processor whose options dialog is open.
     processing_dialog: Option<(String, Processor)>,
     editing_label: Option<(String, String)>,
     _tray: Option<tray_icon::TrayIcon>,
@@ -394,8 +395,11 @@ impl eframe::App for App {
             ui.add_enabled_ui(!modal && !busy, |ui| self.mixer_panel(ui));
         });
         self.dialogs(ctx);
-        self.duck_dialog_ui(ctx);
-        self.processing_dialog_ui(ctx);
+        // The strip dialogs are greyed out while the window is (another
+        // dialog open, or busy), like the strips behind them.
+        let enabled = !modal && !busy;
+        self.duck_dialog_ui(ctx, enabled);
+        self.processing_dialog_ui(ctx, enabled);
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 }
@@ -729,7 +733,7 @@ impl App {
                 let ducks = !strip.duck_by.is_empty();
                 let hint = if ducks { "Ducking: lowered while other strips play" } else { "Set up ducking" };
                 if widgets::toggle(ui, "Duck", ducks, DUCK_COLOR).on_hover_text(hint).clicked() {
-                    self.duck_dialog = Some(strip.id.clone());
+                    self.duck_dialog = Some(strip.key.clone());
                 }
             });
             ui.add_space(2.0);
@@ -760,10 +764,10 @@ impl App {
             );
             changed |= moved;
             if open_gate {
-                self.processing_dialog = Some((strip.id.clone(), Processor::Gate));
+                self.processing_dialog = Some((strip.key.clone(), Processor::Gate));
             }
             if open_comp {
-                self.processing_dialog = Some((strip.id.clone(), Processor::Compressor));
+                self.processing_dialog = Some((strip.key.clone(), Processor::Compressor));
             }
             if let Some(port) = &strip.port {
                 widgets::port_status(ui, port);
@@ -1156,14 +1160,16 @@ enum Processor {
 impl App {
     /// A strip's noise gate or compressor options. Not modal, like the
     /// ducking dialog; changes apply at once.
-    fn processing_dialog_ui(&mut self, ctx: &egui::Context) {
-        let Some((id, processor)) = self.processing_dialog.clone() else {
+    fn processing_dialog_ui(&mut self, ctx: &egui::Context, enabled: bool) {
+        let Some((key, processor)) = self.processing_dialog.clone() else {
             return;
         };
-        let Some(index) = self.strips.iter().position(|s| s.id == id) else {
+        let Some(index) = self.strips.iter().position(|s| s.key == key) else {
             self.processing_dialog = None;
             return;
         };
+        // Commands name the strip by its ID as it is now.
+        let id = self.strips[index].id.clone();
         let strip = self.strips[index].clone();
         let mut params = strip.params.clone();
         let mut changed = false;
@@ -1174,6 +1180,7 @@ impl App {
         };
         egui::Window::new(title)
             .id(egui::Id::new("processing dialog"))
+            .enabled(enabled)
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1291,15 +1298,17 @@ impl App {
     /// A strip's ducking: the strips that lower it while they play, by how
     /// much, and (under Timing) how fast. Not modal, so the mixer can be used
     /// while it is open; changes apply at once.
-    fn duck_dialog_ui(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.duck_dialog.clone() else {
+    fn duck_dialog_ui(&mut self, ctx: &egui::Context, enabled: bool) {
+        let Some(key) = self.duck_dialog.clone() else {
             return;
         };
-        let Some(index) = self.strips.iter().position(|s| s.id == id) else {
+        let Some(index) = self.strips.iter().position(|s| s.key == key) else {
             // The strip went (a removed device, say).
             self.duck_dialog = None;
             return;
         };
+        // Commands name the strip by its ID as it is now.
+        let id = self.strips[index].id.clone();
         let strip = self.strips[index].clone();
         let others: Vec<(String, String)> =
             self.strips.iter().filter(|s| s.id != id).map(|s| (s.id.clone(), s.label.clone())).collect();
@@ -1310,6 +1319,7 @@ impl App {
         let mut params_changed = false;
         egui::Window::new(format!("Ducking: {}", strip.label))
             .id(egui::Id::new("duck dialog"))
+            .enabled(enabled)
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1615,8 +1625,8 @@ mod tests {
                 app.refresh();
                 egui::CentralPanel::default().show(ctx, |ui| app.mixer_panel(ui));
                 app.dialogs(ctx);
-                app.duck_dialog_ui(ctx);
-                app.processing_dialog_ui(ctx);
+                app.duck_dialog_ui(ctx, true);
+                app.processing_dialog_ui(ctx, true);
             });
         }
 
@@ -1712,7 +1722,7 @@ mod tests {
         (mic.id, mic.key, mic.label) = ("H2".into(), "k2".into(), "Mic".into());
         h.snapshot.strips.push(mic);
         h.frame(vec![]);
-        h.app.duck_dialog = Some("H1".into());
+        h.app.duck_dialog = Some("k1".into());
         h.frame(vec![]);
         h.frame(vec![]);
         // Tick "Mic (H2)": the list is at the top of the dialog.
@@ -1741,6 +1751,17 @@ mod tests {
             _ => None,
         });
         assert_eq!(amount, Some(20.0), "{:?}", h.sent);
+        // An earlier strip goes, so this one's ID shifts: the dialog stays
+        // with it, by key, and its changes go to the new ID.
+        let mut shifted = h.snapshot.strips.clone();
+        shifted.retain(|s| s.id != "H2");
+        let mut extra = shifted[0].clone();
+        (extra.id, extra.key, extra.label) = ("H0".into(), "k0".into(), "Earlier".into());
+        shifted.insert(0, extra);
+        h.snapshot.strips = shifted;
+        h.frame(vec![]);
+        assert_eq!(h.app.duck_dialog.as_deref(), Some("k1"), "still on its strip");
+
         // The strip goes: so does the dialog.
         h.snapshot.strips.retain(|s| s.id != "H1");
         h.frame(vec![]);
@@ -1764,7 +1785,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(h.app.processing_dialog, Some(("H1".into(), Processor::Gate)), "the Gate label opened it");
+        assert_eq!(h.app.processing_dialog, Some(("k1".into(), Processor::Gate)), "the Gate label opened it");
         h.sent.clear();
         // The Range box, first in the dialog, below its title bar (whose close
         // button is at the top right).
@@ -1778,7 +1799,7 @@ mod tests {
         });
         assert_eq!(range, Some(30.0), "{:?}", h.sent);
 
-        h.app.processing_dialog = Some(("H1".into(), Processor::Compressor));
+        h.app.processing_dialog = Some(("k1".into(), Processor::Compressor));
         h.sent.clear();
         h.frame(vec![]);
         h.frame(vec![]);

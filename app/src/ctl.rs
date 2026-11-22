@@ -181,7 +181,7 @@ pub fn format_status(snapshot: &Snapshot) -> String {
     }
     text.push_str("INPUTS\n");
     text.push_str(&format!(
-        "  {:<5} {:<name_width$} {:>9}  {:<14} {:<16} KEY\n",
+        "  {:<5} {:<name_width$} {:>9}  {:<19} {:<16} KEY\n",
         "ID", "NAME", "GAIN", "SWITCHES", "SENDS TO"
     ));
     for StripView { id, key, label, params, routes, duck_by, .. } in &snapshot.strips {
@@ -193,14 +193,14 @@ pub fn format_status(snapshot: &Snapshot) -> String {
         ]);
         let sends = if routes.is_empty() { "-".to_string() } else { routes.join(",") };
         text.push_str(&format!(
-            "  {id:<5} {:<name_width$} {:>9}  {switches:<14} {sends:<16} {key}\n",
+            "  {id:<5} {:<name_width$} {:>9}  {switches:<19} {sends:<16} {key}\n",
             ellipsize(label, name_width),
             gain(params.gain_db)
         ));
     }
     text.push_str("OUTPUTS\n");
     text.push_str(&format!(
-        "  {:<5} {:<name_width$} {:>9}  {:<14} {:<16} KEY\n",
+        "  {:<5} {:<name_width$} {:>9}  {:<19} {:<16} KEY\n",
         "ID", "NAME", "GAIN", "SWITCHES", "DEVICE"
     ));
     for BusView { id, key, label, params, port, .. } in &snapshot.buses {
@@ -212,7 +212,7 @@ pub fn format_status(snapshot: &Snapshot) -> String {
             None => "virtual".to_string(),
         };
         text.push_str(&format!(
-            "  {id:<5} {:<name_width$} {:>9}  {switches:<14} {:<16} {key}\n",
+            "  {id:<5} {:<name_width$} {:>9}  {switches:<19} {:<16} {key}\n",
             ellipsize(label, name_width),
             gain(params.gain_db),
             ellipsize(&device, 16)
@@ -297,7 +297,7 @@ mod tests {
             ..Default::default()
         };
         let text = format_status(&snapshot);
-        assert!(text.contains("H1    Mic    -6.0 dB  mute           A1,B2            a1b2c3d4e5f6"), "{text}");
-        assert!(text.contains("A1    A1     -inf dB  -              Speakers         0f0f0f0f0f0f"), "{text}");
+        assert!(text.contains("H1    Mic    -6.0 dB  mute                A1,B2            a1b2c3d4e5f6"), "{text}");
+        assert!(text.contains("A1    A1     -inf dB  -                   Speakers         0f0f0f0f0f0f"), "{text}");
     }
 }

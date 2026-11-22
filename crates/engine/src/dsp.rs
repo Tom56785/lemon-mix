@@ -131,6 +131,14 @@ impl Default for Eq3 {
 }
 
 impl Eq3 {
+    /// Takes up another's filter memory, so a strip that carries on into a
+    /// new layout does not restart its filters.
+    pub fn carry_from(&mut self, old: &Eq3) {
+        for (band, old) in self.bands.iter_mut().zip(&old.bands) {
+            band.state = old.state;
+        }
+    }
+
     pub fn set(&mut self, gains: [f32; 3]) {
         for (band, (gain, (shape, frequency, q))) in self.bands.iter_mut().zip(gains.iter().zip(EQ_BANDS)) {
             band.design(shape, frequency, q, *gain as f64);
@@ -202,6 +210,11 @@ pub fn gate_threshold_db(amount: f32) -> f32 {
 }
 
 impl Gate {
+    /// Takes up another's moment: its level, opening and hold.
+    pub fn carry_from(&mut self, old: &Gate) {
+        (self.envelope, self.gain, self.hold) = (old.envelope, old.gain, old.hold);
+    }
+
     pub fn set(&mut self, amount: f32, options: GateOptions) {
         if self.amount == 0.0 && amount > 0.0 {
             self.gain = 1.0;
@@ -287,6 +300,11 @@ pub fn comp_curve(amount: f32) -> (f32, f32) {
 }
 
 impl Compressor {
+    /// Takes up another's moment: its level and gain reduction.
+    pub fn carry_from(&mut self, old: &Compressor) {
+        (self.envelope_db, self.gain_db) = (old.envelope_db, old.gain_db);
+    }
+
     pub fn set(&mut self, amount: f32, options: CompOptions) {
         let options = options.sanitized();
         self.amount = amount;
@@ -295,8 +313,10 @@ impl Compressor {
         self.knee_db = options.knee_db;
         self.attack = coefficient(options.attack_ms);
         self.release = coefficient(options.release_ms);
-        // Automatic make-up: half the reduction a full-scale signal would get.
-        let auto = -self.threshold_db * (1.0 - 1.0 / self.ratio) * 0.5;
+        // Automatic make-up: half the reduction a full-scale signal would get,
+        // no more than a fixed make-up may be (a manual curve could ask for
+        // nearly 30 dB, lifting the noise floor with it).
+        let auto = (-self.threshold_db * (1.0 - 1.0 / self.ratio) * 0.5).min(*crate::params::COMP_MAKEUP_DB.end());
         self.makeup = db_to_gain(options.makeup_db.unwrap_or(auto));
     }
 
@@ -386,9 +406,6 @@ impl Limiter {
     }
 }
 
-/// Removes the step where a stream was cut: over one frame, the last sample
-/// before the cut decays to nothing while the new audio fades in, so a jump
-/// becomes a 1 ms crossfade and audio that stops fades out.
 /// Ducking's gain, one step per 1 ms frame: down to the lowered level while a
 /// source plays and for the hold after, then back up to unity. Each fade is
 /// even in dB and takes its set duration from one end to the other; the sends
@@ -408,6 +425,17 @@ pub struct Ducker {
 }
 
 impl Ducker {
+    /// Takes up another's moment: how far down it is and its hold, so a
+    /// ducked strip stays ducked into a new layout.
+    pub fn carry_from(&mut self, old: &Ducker) {
+        (self.gain_db, self.gain, self.held) = (old.gain_db, old.gain, old.held);
+        // A smaller amount now: no lower than it.
+        if self.gain_db < -self.amount_db {
+            self.gain_db = -self.amount_db;
+            self.gain = db_to_gain(self.gain_db);
+        }
+    }
+
     pub fn new(params: DuckParams) -> Ducker {
         let mut ducker = Ducker {
             gain_db: 0.0,
@@ -467,6 +495,9 @@ impl Ducker {
     }
 }
 
+/// Removes the step where a stream was cut: over one frame, the last sample
+/// before the cut decays to nothing while the new audio fades in, so a jump
+/// becomes a 1 ms crossfade and audio that stops fades out.
 pub fn declick(frame: &mut Frame, last: [f32; 2]) {
     for (i, pair) in frame.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         let w = (i + 1) as f32 / FRAME_SAMPLES as f32;
@@ -556,6 +587,15 @@ mod tests {
             })
         };
         assert!(after_10_ms(1.0) < after_10_ms(100.0) * 0.8, "{} vs {}", after_10_ms(1.0), after_10_ms(100.0));
+
+        // Automatic make-up stays within what a fixed one may be: -60 dBFS at
+        // 20:1 would ask for 28.5 dB.
+        let mut deep = Compressor::default();
+        deep.set(
+            1.0,
+            CompOptions { manual: true, threshold_db: -60.0, ratio: 20.0, makeup_db: None, ..Default::default() },
+        );
+        assert!((deep.makeup - db_to_gain(24.0)).abs() < 1e-3, "{} dB", 20.0 * deep.makeup.log10());
 
         // Not manual: the knob's curve, whatever the options say.
         let mut knob = Compressor::default();

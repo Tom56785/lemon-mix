@@ -67,11 +67,15 @@ test("the mixer subscribes, sends changes and follows Lemon Mix coming and going
 		{ op: "control", action: { action: "solo", target: "Nobody" } },
 	]);
 
-	// Asking for meters subscribes again with them.
+	// Asking for meters subscribes again with them, keeping the state
+	// meanwhile: keys do not flicker to "not running".
+	const statesBefore = states.length;
 	const meters = once(mixer, "meters");
 	mixer.setMeters(true);
 	await meters;
 	assert.deepEqual(fake.received.at(-1), { op: "subscribe", meters: true });
+	assert.ok(states.slice(statesBefore).every((s) => s !== undefined), "no state was lost while switching");
+	assert.equal(mixer.connected, true);
 
 	// Lemon Mix stops: the state goes, and comes back when it does.
 	fake.server.close();

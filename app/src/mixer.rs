@@ -528,6 +528,18 @@ impl MixerHost {
         if ensure_keys(&mut mixer.saved) {
             self.mark_dirty();
         }
+        // Ducking sources that are not strips now (a cable removed while
+        // another profile was active, say) are forgotten, so they can be
+        // neither stuck in the list nor taken up by a later strip of that ID.
+        let mut pruned = false;
+        for strip in &mut mixer.saved.strips {
+            let before = strip.duck_by.len();
+            strip.duck_by.retain(|source| strip_ids.contains(source));
+            pruned |= strip.duck_by.len() != before;
+        }
+        if pruned {
+            self.mark_dirty();
+        }
         let mut topology = Topology::default();
         for id in &strip_ids {
             let saved = mixer.saved.strips.iter().find(|s| &s.id == id).expect("added above");
@@ -554,7 +566,13 @@ impl MixerHost {
             };
             let routes = saved.routes.iter().filter_map(|r| bus_ids.iter().position(|b| b == r)).collect();
             let duck_sources = saved.duck_by.iter().filter_map(|s| strip_ids.iter().position(|id| id == s)).collect();
-            topology.strips.push(StripSpec { source, params: saved.params.clone(), routes, duck_sources });
+            topology.strips.push(StripSpec {
+                source,
+                params: saved.params.clone(),
+                routes,
+                duck_sources,
+                identity: strip_identity(&saved.key),
+            });
         }
         for id in &bus_ids {
             let saved = mixer.saved.buses.iter().find(|b| &b.id == id).expect("added above");
@@ -1111,6 +1129,14 @@ pub const BUS_SOURCE: &str = "bus:";
 /// The key of the bus a strip's device names, if it names one.
 pub fn bus_source_key(device: &str) -> Option<&str> {
     device.strip_prefix(BUS_SOURCE)
+}
+
+/// A strip's identity for the engine, from its key: the same strip in each
+/// layout, whatever its ID. Never 0, which means none.
+fn strip_identity(key: &str) -> u64 {
+    // FNV-1a: stable across runs, unlike the standard library's hasher.
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    hash.max(1)
 }
 
 /// Forgets a strip that is gone: its settings, and its ducking of others.
@@ -1678,6 +1704,18 @@ id = \"H1\""
         assert_eq!(duck_by(&host, "V1"), ["H2"]);
         let saved = host.saved_mixer();
         assert_eq!(saved.strips.iter().find(|s| s.id == "V1").unwrap().duck_by, ["H2"], "saved too");
+
+        // A source that is not a strip now, as from another profile, is
+        // forgotten when the strips are rebuilt.
+        {
+            let mut mixer = lock(&host.mixer);
+            let v1 = mixer.saved.strips.iter_mut().find(|s| s.id == "V1").unwrap();
+            v1.duck_by.push("V7".into());
+        }
+        host.command(&MixerCommand::AddStrip).unwrap();
+        assert_eq!(duck_by(&host, "V1"), ["H2"], "V7 is gone");
+        duck("V1", &["H2", "H1"]).unwrap();
+        host.command(&MixerCommand::RemoveStrip { id: "H3".into() }).unwrap();
 
         // A cable's strip ducking others goes with the cable.
         duck("H1", &["V1"]).unwrap();

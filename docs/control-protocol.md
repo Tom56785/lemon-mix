@@ -100,6 +100,8 @@ When the pipe closes, Lemon Mix has stopped. Connect again every few seconds to 
 
 The window uses `{"op": "mixer", "command": {...}}` for everything it changes. Its commands are in `MixerCommand` in `app/src/protocol.rs`. Controllers can use them too, but they name strips and buses only by ID.
 
+`strip` and `bus` replace all of a strip's or bus's settings: send back the whole `params` from the snapshot with your changes, since any setting left out goes back to its default. For a single change, a `control` action is simpler.
+
 `device` sets a hardware strip's or bus's device. A strip can take a bus's output instead of a device:
 
 ```json

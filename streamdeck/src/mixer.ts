@@ -65,6 +65,8 @@ export class Mixer extends EventEmitter<MixerEvents> {
 	#meters = false;
 	#stopped = true;
 	#snapshot: Snapshot | undefined;
+	/** The connection being closed to change the meter choice, which keeps the state. */
+	#switching: net.Socket | undefined;
 
 	constructor(private readonly pipe: string = CONTROL_PIPE) {
 		super();
@@ -99,7 +101,9 @@ export class Mixer extends EventEmitter<MixerEvents> {
 		}
 		this.#meters = on;
 		if (this.#socket) {
-			// Ending the connection makes the next one, with the new choice.
+			// Ending the connection makes the next one, with the new choice. The
+			// state stays meanwhile: Lemon Mix has not gone, so keys do not flicker.
+			this.#switching = this.#socket;
 			this.#socket.destroy();
 		}
 	}
@@ -129,7 +133,10 @@ export class Mixer extends EventEmitter<MixerEvents> {
 			if (this.#socket === socket) {
 				this.#socket = undefined;
 			}
-			if (this.#snapshot) {
+			const switching = this.#switching === socket;
+			if (switching) {
+				this.#switching = undefined;
+			} else if (this.#snapshot) {
 				this.#snapshot = undefined;
 				this.emit("state", undefined);
 			}

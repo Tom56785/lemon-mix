@@ -68,6 +68,10 @@ pub struct StripSpec {
     pub routes: Vec<usize>,
     /// The strips that duck this one while they play, by index.
     pub duck_sources: Vec<usize>,
+    /// Identifies the strip across layouts, so one that carries on into a
+    /// new layout keeps its moment: its ducking, gate, compressor and filter
+    /// state. 0 is a strip with nothing to carry.
+    pub identity: u64,
 }
 
 pub struct BusSpec {
@@ -110,6 +114,7 @@ pub struct Layout {
 
 struct StripState {
     source: StripSource,
+    identity: u64,
     params: StripParams,
     /// Whether this strip feeds each bus, by bus index. Sized with the
     /// layout, so routing changes never allocate.
@@ -276,6 +281,7 @@ impl Engine {
                 }
                 let mut state = StripState {
                     source: spec.source,
+                    identity: spec.identity,
                     params: StripParams::default(),
                     routes,
                     eq: Eq3::default(),
@@ -420,6 +426,23 @@ impl Drop for Clock {
 }
 
 impl StripState {
+    /// Takes up the moment of the same strip in the layout before.
+    fn carry_from(&mut self, old: &StripState) {
+        self.eq.carry_from(&old.eq);
+        self.gate.carry_from(&old.gate);
+        self.comp.carry_from(&old.comp);
+        self.ducker.carry_from(&old.ducker);
+        self.duck = old.duck;
+        self.level = old.level;
+        self.rms = old.rms;
+        (self.last, self.last_own) = (old.last, old.last_own);
+        // The sends start at the strip's settings; ducked, they start ducked.
+        for send in &mut self.sends {
+            send[0] *= self.duck;
+            send[1] *= self.duck;
+        }
+    }
+
     fn apply(&mut self, params: StripParams) {
         if params.eq != self.params.eq {
             self.eq.set(params.eq);
@@ -448,7 +471,15 @@ impl Core {
     fn apply_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
             match command {
-                Command::Layout(layout) => {
+                Command::Layout(mut layout) => {
+                    // Strips that carry on keep their moment, so a rebuild (a
+                    // device plugged in, a strip added) is not heard. A plain
+                    // search: there are few strips, and it allocates nothing.
+                    for strip in layout.strips.iter_mut().filter(|s| s.identity != 0) {
+                        if let Some(old) = self.layout.strips.iter().find(|o| o.identity == strip.identity) {
+                            strip.carry_from(old);
+                        }
+                    }
                     let old = std::mem::replace(&mut self.layout, layout);
                     let _ = self.garbage.send(old);
                 }
