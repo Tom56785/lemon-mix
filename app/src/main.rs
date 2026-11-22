@@ -62,6 +62,7 @@ fn main() {
     // errors append to it instead.
     let fresh = matches!(&parsed, Ok(cli) if !cli.is_helper_mode());
     let (logger, log_closer, log_path) = new_application_logger(fresh);
+    log_panics(&logger);
     let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&logger, &log_path, parsed))) {
         Ok(code) => code,
         Err(panic) => {
@@ -84,6 +85,28 @@ fn main() {
     if code != 0 {
         std::process::exit(code);
     }
+}
+
+/// Writes every panic to the log, with its thread, place and backtrace,
+/// before Rust's own handling. A panic in a window or audio callback ends the
+/// process without unwinding to `main`, so this is the only record of it.
+fn log_panics(logger: &Logger) {
+    let logger = logger.clone();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".into());
+        let place = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        logf!(logger, "PANIC in thread {}: {message} at {place}", thread.name().unwrap_or("unnamed"));
+        logf!(logger, "Backtrace:\n{}", std::backtrace::Backtrace::force_capture());
+        flush_log();
+        previous(info);
+    }));
 }
 
 /// Runs the application and returns the process exit code.
