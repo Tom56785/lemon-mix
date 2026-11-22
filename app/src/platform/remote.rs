@@ -326,6 +326,7 @@ mod tests {
             label: "Mic".into(),
             params: Default::default(),
             routes: Vec::new(),
+            duck_by: Vec::new(),
             meter: Meter { peak: [peak; 2], ..Default::default() },
             port: Some(crate::protocol::PortView { fill_ms, ..Default::default() }),
         };

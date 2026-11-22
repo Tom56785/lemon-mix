@@ -553,7 +553,8 @@ impl MixerHost {
                 }
             };
             let routes = saved.routes.iter().filter_map(|r| bus_ids.iter().position(|b| b == r)).collect();
-            topology.strips.push(StripSpec { source, params: saved.params.clone(), routes });
+            let duck_sources = saved.duck_by.iter().filter_map(|s| strip_ids.iter().position(|id| id == s)).collect();
+            topology.strips.push(StripSpec { source, params: saved.params.clone(), routes, duck_sources });
         }
         for id in &bus_ids {
             let saved = mixer.saved.buses.iter().find(|b| &b.id == id).expect("added above");
@@ -583,13 +584,40 @@ impl MixerHost {
         let keep_strip = kind.is_some_and(CableKind::has_playback);
         let keep_bus = kind.is_some_and(CableKind::has_recording);
         if !keep_strip {
-            mixer.saved.strips.retain(|s| s.id != strip);
+            forget_strip(&mut mixer.saved, &strip);
         }
         if !keep_bus {
             forget_bus(&mut mixer.saved, &bus);
         }
         drop(mixer);
         self.mark_dirty();
+    }
+
+    /// Sets the strips that duck strip `id` while they play: any others, by ID.
+    fn set_duck_sources(&self, id: &str, sources: &[String]) -> Result<(), String> {
+        let mut mixer = lock(&self.mixer);
+        let index = mixer.strips.iter().position(|s| s == id).ok_or("That strip no longer exists.")?;
+        let mut chosen: Vec<String> = Vec::new();
+        for source in sources {
+            let source = source.trim().to_ascii_uppercase();
+            if source == id {
+                return Err("A strip cannot duck itself.".into());
+            }
+            if !mixer.strips.contains(&source) {
+                return Err(format!("There is no strip {source}."));
+            }
+            if !chosen.contains(&source) {
+                chosen.push(source);
+            }
+        }
+        // In the order of the strips, as routes are in the order of the buses.
+        chosen.sort_by_key(|s| mixer.strips.iter().position(|id| id == s));
+        let strip = mixer.saved.strips.iter_mut().find(|s| s.id == id).ok_or("That strip no longer exists.")?;
+        strip.duck_by = chosen.clone();
+        for (other, other_id) in mixer.strips.iter().enumerate() {
+            self.engine.set_duck_source(index, other, chosen.contains(other_id));
+        }
+        Ok(())
     }
 
     /// Chooses a hardware strip's or bus's device: "" for none, "default",
@@ -663,6 +691,7 @@ impl MixerHost {
             MixerCommand::CreateProfile { name, from_defaults } => self.create_profile(name, *from_defaults)?,
             MixerCommand::DeleteProfile { name } => return self.delete_profile(name),
             MixerCommand::SwitchProfile { name } => self.switch_profile(name)?,
+            MixerCommand::Duck { strip, sources } => self.set_duck_sources(strip, sources)?,
             MixerCommand::AddStrip => self.add_hardware(true),
             MixerCommand::AddBus => self.add_hardware(false),
             MixerCommand::RemoveStrip { id } => self.remove_hardware(id, true)?,
@@ -763,7 +792,7 @@ impl MixerHost {
         let (strip_meters, bus_meters) = self.meter_readings();
         let meter = |m: Option<&engine::MeterReading>| {
             let r = m.copied().unwrap_or(engine::MeterReading { reduction: 1.0, ..Default::default() });
-            Meter { peak: r.peak, rms: r.rms, reduction: r.reduction }
+            Meter { peak: r.peak, rms: r.rms, reduction: r.reduction, duck: r.duck }
         };
         let inputs = lock(&self.inputs);
         let outputs = lock(&self.outputs);
@@ -812,6 +841,7 @@ impl MixerHost {
                     label,
                     params: saved.params.clone(),
                     routes: saved.routes.clone(),
+                    duck_by: saved.duck_by.clone(),
                     meter: meter(strip_meters.get(index)),
                     port,
                 })
@@ -978,7 +1008,7 @@ impl MixerHost {
         // Settings left from an earlier strip or bus of this number, as after
         // config.toml was edited by hand, do not come back with it.
         if strip {
-            mixer.saved.strips.retain(|s| s.id != id);
+            forget_strip(&mut mixer.saved, &id);
         } else {
             forget_bus(&mut mixer.saved, &id);
         }
@@ -1018,10 +1048,15 @@ impl MixerHost {
             (number > n).then(|| format!("{letter}{}", number - 1))
         };
         if strip {
-            mixer.saved.strips.retain(|s| s.id != id);
+            forget_strip(&mut mixer.saved, id);
             for s in &mut mixer.saved.strips {
                 if let Some(new) = moved(&s.id) {
                     s.id = new;
+                }
+                for source in &mut s.duck_by {
+                    if let Some(new) = moved(source) {
+                        *source = new;
+                    }
                 }
             }
         } else {
@@ -1076,6 +1111,14 @@ pub const BUS_SOURCE: &str = "bus:";
 /// The key of the bus a strip's device names, if it names one.
 pub fn bus_source_key(device: &str) -> Option<&str> {
     device.strip_prefix(BUS_SOURCE)
+}
+
+/// Forgets a strip that is gone: its settings, and its ducking of others.
+fn forget_strip(saved: &mut SavedMixer, id: &str) {
+    saved.strips.retain(|s| s.id != id);
+    for s in &mut saved.strips {
+        s.duck_by.retain(|source| source != id);
+    }
 }
 
 /// Forgets a bus that is gone: its settings, every route to it, and every
@@ -1187,6 +1230,7 @@ fn default_strip(id: &str, cables: &[Cable]) -> SavedStrip {
     SavedStrip {
         id: id.to_string(),
         key: String::new(),
+        duck_by: Vec::new(),
         label: String::new(),
         params: engine::StripParams::default(),
         routes,
@@ -1605,6 +1649,42 @@ id = \"H1\""
         let config =
             crate::config::parse_config(&std::fs::read_to_string(crate::config::config_file_path()).unwrap()).unwrap();
         assert_eq!(crate::config::config_profile(&config), "Fresh");
+        host.shutdown();
+    }
+
+    /// A strip's ducking sources are other strips, kept in strip order, and
+    /// follow them as strips are renumbered or removed.
+    #[test]
+    fn ducking_sources_follow_the_strips() {
+        let host = MixerHost::new(settings(), SavedMixer::default(), &Logger::discard(), "", false);
+        host.apply(&[cable(1, CableKind::Input)]).unwrap();
+        host.command(&MixerCommand::AddStrip).unwrap(); // H1, H2, H3 and V1
+        let duck = |strip: &str, sources: &[&str]| {
+            let sources = sources.iter().map(|s| s.to_string()).collect();
+            host.command(&MixerCommand::Duck { strip: strip.into(), sources })
+        };
+        let duck_by = |host: &MixerHost, strip: &str| {
+            host.views().0.into_iter().find(|s| s.id == strip).map(|s| s.duck_by).unwrap_or_default()
+        };
+        duck("V1", &["H3", "h1", "H3"]).unwrap();
+        assert_eq!(duck_by(&host, "V1"), ["H1", "H3"], "in strip order, once each");
+        assert!(duck("V1", &["V1"]).is_err(), "not itself");
+        assert!(duck("V1", &["H9"]).is_err(), "only strips that exist");
+        assert!(duck("V9", &["H1"]).is_err());
+        assert_eq!(duck_by(&host, "V1"), ["H1", "H3"], "a refused change changes nothing");
+
+        // Removing H1 forgets it; H3 becomes H2, and the source follows.
+        host.command(&MixerCommand::RemoveStrip { id: "H1".into() }).unwrap();
+        assert_eq!(duck_by(&host, "V1"), ["H2"]);
+        let saved = host.saved_mixer();
+        assert_eq!(saved.strips.iter().find(|s| s.id == "V1").unwrap().duck_by, ["H2"], "saved too");
+
+        // A cable's strip ducking others goes with the cable.
+        duck("H1", &["V1"]).unwrap();
+        host.forget_cable_settings(1, None);
+        assert!(host.saved_mixer().strips.iter().all(|s| !s.duck_by.contains(&"V1".to_string())));
+        duck("H1", &[]).unwrap();
+        assert!(duck_by(&host, "H1").is_empty());
         host.shutdown();
     }
 

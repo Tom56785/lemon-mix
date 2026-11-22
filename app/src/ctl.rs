@@ -184,8 +184,13 @@ pub fn format_status(snapshot: &Snapshot) -> String {
         "  {:<5} {:<name_width$} {:>9}  {:<14} {:<16} KEY\n",
         "ID", "NAME", "GAIN", "SWITCHES", "SENDS TO"
     ));
-    for StripView { id, key, label, params, routes, .. } in &snapshot.strips {
-        let switches = flags(&[(params.mute, "mute"), (params.solo, "solo"), (params.mono, "mono")]);
+    for StripView { id, key, label, params, routes, duck_by, .. } in &snapshot.strips {
+        let switches = flags(&[
+            (params.mute, "mute"),
+            (params.solo, "solo"),
+            (params.mono, "mono"),
+            (!duck_by.is_empty(), "duck"),
+        ]);
         let sends = if routes.is_empty() { "-".to_string() } else { routes.join(",") };
         text.push_str(&format!(
             "  {id:<5} {:<name_width$} {:>9}  {switches:<14} {sends:<16} {key}\n",
@@ -277,6 +282,7 @@ mod tests {
                 label: "Mic".into(),
                 params: StripParams { gain_db: -6.0, mute: true, ..Default::default() },
                 routes: vec!["A1".into(), "B2".into()],
+                duck_by: Vec::new(),
                 meter: Default::default(),
                 port: Some(PortView::default()),
             }],

@@ -395,6 +395,8 @@ pub struct SavedStrip {
     pub params: engine::StripParams,
     /// The buses it feeds, by bus ID (`A1`, `B3`).
     pub routes: Vec<String>,
+    /// The strips that duck it while they play, by strip ID (`H1`, `V3`).
+    pub duck_by: Vec<String>,
     /// The physical device of a hardware strip: "" for none, "default" for
     /// the system default, or an endpoint ID.
     pub device: String,
@@ -519,6 +521,37 @@ pub fn config_mixer(config: &Config) -> SavedMixer {
                 eq,
                 gate: float(table, "gate", 0.0),
                 comp: float(table, "comp", 0.0),
+                gate_options: {
+                    let d = engine::GateOptions::default();
+                    engine::GateOptions {
+                        range_db: float(table, "gate_range_db", d.range_db),
+                        attack_ms: float(table, "gate_attack_ms", d.attack_ms),
+                        hold_ms: float(table, "gate_hold_ms", d.hold_ms),
+                        release_ms: float(table, "gate_release_ms", d.release_ms),
+                    }
+                },
+                comp_options: {
+                    let d = engine::CompOptions::default();
+                    engine::CompOptions {
+                        attack_ms: float(table, "comp_attack_ms", d.attack_ms),
+                        release_ms: float(table, "comp_release_ms", d.release_ms),
+                        knee_db: float(table, "comp_knee_db", d.knee_db),
+                        makeup_db: table.contains_key("comp_makeup_db").then(|| float(table, "comp_makeup_db", 0.0)),
+                        manual: boolean(table, "comp_manual"),
+                        threshold_db: float(table, "comp_threshold_db", d.threshold_db),
+                        ratio: float(table, "comp_ratio", d.ratio),
+                    }
+                },
+                duck: {
+                    let defaults = engine::DuckParams::default();
+                    engine::DuckParams {
+                        amount_db: float(table, "duck_amount_db", defaults.amount_db),
+                        threshold_db: float(table, "duck_threshold_db", defaults.threshold_db),
+                        fade_down_ms: float(table, "duck_fade_down_ms", defaults.fade_down_ms),
+                        hold_ms: float(table, "duck_hold_ms", defaults.hold_ms),
+                        fade_up_ms: float(table, "duck_fade_up_ms", defaults.fade_up_ms),
+                    }
+                },
             }
             .sanitized();
             let routes = table
@@ -534,7 +567,21 @@ pub fn config_mixer(config: &Config) -> SavedMixer {
                     routes
                 })
                 .unwrap_or_default();
+            let duck_by = table
+                .get("duck_by")
+                .and_then(Item::as_array)
+                .map(|a| {
+                    let mut sources: Vec<String> = Vec::new();
+                    for strip in a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().to_ascii_uppercase()) {
+                        if is_valid_port_id(&strip, &['H', 'V']) && strip != id && !sources.contains(&strip) {
+                            sources.push(strip);
+                        }
+                    }
+                    sources
+                })
+                .unwrap_or_default();
             mixer.strips.push(SavedStrip {
+                duck_by,
                 key: key_text(table),
                 label: text(table, "label").chars().take(MAX_CABLE_NAME).collect(),
                 device: text(table, "device"),
@@ -617,6 +664,40 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
                 routes.push(bus.as_str());
             }
             t.insert("routes", value(routes));
+            // The gate's and compressor's options, once changed.
+            if p.gate_options != engine::GateOptions::default() {
+                let g = &p.gate_options;
+                t.insert("gate_range_db", value(rounded(g.range_db)));
+                t.insert("gate_attack_ms", value(rounded(g.attack_ms)));
+                t.insert("gate_hold_ms", value(rounded(g.hold_ms)));
+                t.insert("gate_release_ms", value(rounded(g.release_ms)));
+            }
+            if p.comp_options != engine::CompOptions::default() {
+                let c = &p.comp_options;
+                t.insert("comp_attack_ms", value(rounded(c.attack_ms)));
+                t.insert("comp_release_ms", value(rounded(c.release_ms)));
+                t.insert("comp_knee_db", value(rounded(c.knee_db)));
+                if let Some(makeup) = c.makeup_db {
+                    t.insert("comp_makeup_db", value(rounded(makeup)));
+                }
+                t.insert("comp_manual", value(c.manual));
+                t.insert("comp_threshold_db", value(rounded(c.threshold_db)));
+                t.insert("comp_ratio", value(rounded(c.ratio)));
+            }
+            // Ducking, once the strip has sources or settings of its own.
+            if !s.duck_by.is_empty() || p.duck != engine::DuckParams::default() {
+                let mut sources = Array::new();
+                for strip in &s.duck_by {
+                    sources.push(strip.as_str());
+                }
+                t.insert("duck_by", value(sources));
+                let d = &p.duck;
+                t.insert("duck_amount_db", value(rounded(d.amount_db)));
+                t.insert("duck_threshold_db", value(rounded(d.threshold_db)));
+                t.insert("duck_fade_down_ms", value(rounded(d.fade_down_ms)));
+                t.insert("duck_hold_ms", value(rounded(d.hold_ms)));
+                t.insert("duck_fade_up_ms", value(rounded(d.fade_up_ms)));
+            }
             t
         })
         .collect();
@@ -902,6 +983,7 @@ pub(crate) mod tests {
                 label: "Mic".into(),
                 params: engine::StripParams { gain_db: -3.5, eq: [1.0, 0.0, -2.0], ..Default::default() },
                 routes: vec!["A1".into(), "B3".into()],
+                duck_by: vec!["V3".into()],
                 device: "default".into(),
                 exclusive: false,
             }],
@@ -953,6 +1035,7 @@ pub(crate) mod tests {
             label: String::new(),
             params: Default::default(),
             routes: Vec::new(),
+            duck_by: Vec::new(),
             device: String::new(),
             exclusive: false,
         };
@@ -963,6 +1046,80 @@ pub(crate) mod tests {
         let strips = "[[strip]]\nid = \"H300\"\n\n[[strip]]\nid = \"V300\"\n\n[[strip]]\nid = \"H01\"\n";
         let ids: Vec<String> = config_mixer(&parse_config(strips).unwrap()).strips.into_iter().map(|s| s.id).collect();
         assert_eq!(ids, ["H300"], "hardware strips have no maximum; cable IDs stop at {MAX_CABLE_ID}");
+    }
+
+    /// Ducking is read with its sources tidied and its values in range, and
+    /// written only once a strip has sources or settings of its own.
+    #[test]
+    fn ducking_is_read_and_written_with_its_strip() {
+        let content = "[[strip]]
+id = \"H1\"
+duck_by = [\"h2\", \"H1\", \"X9\", \"V3\", \"H2\"]
+\n                       duck_amount_db = 20
+duck_fade_up_ms = 1e9
+";
+        let strip = config_mixer(&parse_config(content).unwrap()).strips.remove(0);
+        assert_eq!(strip.duck_by, ["H2", "V3"], "not itself, not twice, only strips");
+        let d = strip.params.duck;
+        assert_eq!((d.amount_db, d.fade_up_ms, d.threshold_db), (20.0, 10_000.0, -40.0), "defaults fill the rest");
+
+        let plain = SavedStrip {
+            id: "H1".into(),
+            key: String::new(),
+            label: String::new(),
+            params: Default::default(),
+            routes: Vec::new(),
+            duck_by: Vec::new(),
+            device: String::new(),
+            exclusive: false,
+        };
+        let written = |strip: &SavedStrip| {
+            set_mixer_entries("", &SavedMixer { strips: vec![strip.clone()], buses: Vec::new() }).unwrap()
+        };
+        assert!(!written(&plain).contains("duck"), "{}", written(&plain));
+        let mut tuned = plain.clone();
+        tuned.params.duck.amount_db = 6.0;
+        let text = written(&tuned);
+        assert!(text.contains("duck_by = []") && text.contains("duck_amount_db = 6.0"), "{text}");
+        assert_eq!(config_mixer(&parse_config(&text).unwrap()).strips[0].params.duck.amount_db, 6.0);
+    }
+
+    /// The gate's and compressor's options round-trip, and are written only
+    /// once changed.
+    #[test]
+    fn processing_options_are_read_and_written_with_their_strip() {
+        let mut strip = SavedStrip {
+            id: "H1".into(),
+            key: String::new(),
+            label: String::new(),
+            params: Default::default(),
+            routes: Vec::new(),
+            duck_by: Vec::new(),
+            device: String::new(),
+            exclusive: false,
+        };
+        let round_trip = |strip: &SavedStrip| {
+            let text = set_mixer_entries("", &SavedMixer { strips: vec![strip.clone()], buses: Vec::new() }).unwrap();
+            (text.clone(), config_mixer(&parse_config(&text).unwrap()).strips.remove(0).params)
+        };
+        let (text, _) = round_trip(&strip);
+        assert!(!text.contains("gate_") && !text.contains("comp_"), "{text}");
+        strip.params.gate_options = engine::GateOptions { range_db: 30.0, hold_ms: 200.0, ..Default::default() };
+        strip.params.comp_options = engine::CompOptions {
+            manual: true,
+            threshold_db: -24.0,
+            ratio: 6.0,
+            makeup_db: Some(3.0),
+            ..Default::default()
+        };
+        let (text, params) = round_trip(&strip);
+        assert!(text.contains("comp_manual = true") && text.contains("gate_range_db = 30.0"), "{text}");
+        assert_eq!((params.gate_options, params.comp_options), (strip.params.gate_options, strip.params.comp_options));
+        // Automatic make-up is written as no make-up value.
+        strip.params.comp_options.makeup_db = None;
+        let (text, params) = round_trip(&strip);
+        assert!(!text.contains("comp_makeup_db"), "{text}");
+        assert_eq!(params.comp_options.makeup_db, None);
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub use crate::core::{
     BusSink, BusSpec, Command, Engine, EngineStats, InputPort, OutputPort, StripSource, StripSpec, Topology,
 };
 pub use crate::meters::{MeterBank, MeterReading};
-pub use crate::params::{BusParams, StripParams};
+pub use crate::params::{BusParams, CompOptions, DuckParams, GateOptions, StripParams};
 pub use crate::ring::BusRing;
 
 /// Samples per channel in one 1 ms frame at 48 kHz.

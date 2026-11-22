@@ -59,6 +59,7 @@ fn rig(inputs: usize, outputs: usize, routes: &[&[usize]]) -> Rig {
             },
             params: StripParams::default(),
             routes: routes.get(i).copied().unwrap_or(&[]).to_vec(),
+            duck_sources: Vec::new(),
         });
         cables.push(cable);
     }
@@ -101,6 +102,7 @@ fn unity_single_route_is_bit_exact() {
             },
             params: StripParams::default(),
             routes: vec![0],
+            duck_sources: Vec::new(),
         }],
         // A second, silent bus and a muted second strip must not disturb it.
         buses: vec![BusSpec { sink: BusSink::Virtual(ring), params: BusParams::default() }],
@@ -238,8 +240,14 @@ fn hardware_strips_and_buses() {
                 source: StripSource::Hardware(Some(Arc::new(TestInput(tone)))),
                 params: StripParams { pan: -1.0, ..Default::default() },
                 routes: vec![0],
+                duck_sources: Vec::new(),
             },
-            StripSpec { source: StripSource::Hardware(None), params: StripParams::default(), routes: vec![0] },
+            StripSpec {
+                source: StripSource::Hardware(None),
+                params: StripParams::default(),
+                routes: vec![0],
+                duck_sources: Vec::new(),
+            },
         ],
         buses: vec![
             BusSpec {
@@ -301,6 +309,8 @@ fn processing_does_not_allocate() {
     let rig = rig(4, 4, &[&[0, 1], &[1, 2], &[2, 3], &[0, 3]]);
     rig.engine.set_strip(0, StripParams { eq: [3.0, -2.0, 1.0], gate: 2.0, comp: 4.0, ..Default::default() });
     rig.engine.set_bus(1, BusParams { limiter: Some(-3.0), mono: true, ..Default::default() });
+    // Ducking too: strip 0 lowered while strip 1 plays.
+    rig.engine.set_duck_source(0, 1, true);
     rig.engine.process_until(7000); // applies the commands and layout
     let before = crate::alloc_counter::allocations();
     rig.engine.process_until(7100);
@@ -347,9 +357,15 @@ fn a_bus_feeds_a_strip_one_frame_later() {
                 source: StripSource::Hardware(Some(Arc::new(TestInput(tone)))),
                 params: StripParams::default(),
                 routes: vec![0],
+                duck_sources: Vec::new(),
             },
             // Bus 0 comes back in here, and goes on to bus 1.
-            StripSpec { source: StripSource::Bus(0), params: StripParams::default(), routes: vec![1] },
+            StripSpec {
+                source: StripSource::Bus(0),
+                params: StripParams::default(),
+                routes: vec![1],
+                duck_sources: Vec::new(),
+            },
         ],
         buses: vec![
             BusSpec { sink: BusSink::Hardware(None), params: BusParams { gain_db: -6.0, ..Default::default() } },
@@ -370,4 +386,127 @@ fn a_bus_feeds_a_strip_one_frame_later() {
             assert!((pair[0] - 0.5 * half).abs() < 1e-6 && (pair[1] - 0.25 * half).abs() < 1e-6, "{pair:?}");
         }
     }
+}
+
+/// A hardware input whose level can be changed while the engine runs.
+struct SwitchedInput(Arc<Mutex<f32>>);
+impl InputPort for SwitchedInput {
+    fn pull(&self, frame: &mut Frame) {
+        *frame = [*self.0.lock().unwrap(); FRAME_LEN];
+    }
+}
+
+/// Music (strip 0, a steady 0.5) and a microphone (strip 1, switched)
+/// that ducks it, both on one hardware bus; and the microphone's level.
+fn ducking_rig(mic_routed: bool) -> (Arc<Engine>, Arc<TestOutput>, Arc<Mutex<f32>>) {
+    let engine = Arc::new(Engine::new());
+    let output = Arc::new(TestOutput::default());
+    let mic = Arc::new(Mutex::new(0.0f32));
+    engine.set_topology(Topology {
+        strips: vec![
+            StripSpec {
+                source: StripSource::Hardware(Some(Arc::new(TestInput([0.5; FRAME_LEN])))),
+                params: StripParams::default(),
+                routes: vec![0],
+                duck_sources: vec![1],
+            },
+            StripSpec {
+                source: StripSource::Hardware(Some(Arc::new(SwitchedInput(Arc::clone(&mic))))),
+                params: StripParams::default(),
+                routes: if mic_routed { vec![0] } else { Vec::new() },
+                duck_sources: Vec::new(),
+            },
+        ],
+        buses: vec![BusSpec {
+            sink: BusSink::Hardware(Some(Arc::clone(&output) as Arc<dyn OutputPort>)),
+            params: BusParams::default(),
+        }],
+    });
+    (engine, output, mic)
+}
+
+/// The last sample the bus put out.
+fn last_out(output: &TestOutput) -> f32 {
+    output.0.lock().unwrap().last().map_or(0.0, |f| f[FRAME_LEN - 1])
+}
+
+/// Music is lowered by the amount while the microphone plays, held, then
+/// brought back, smoothly; the meter shows how far.
+#[test]
+fn ducking_lowers_a_strip_while_its_source_plays() {
+    let (engine, output, mic) = ducking_rig(false);
+    let duck = crate::DuckParams::default(); // 12 dB, -40 dBFS, 10 ms, 300 ms, 500 ms
+    let mut frame = 20_000;
+    // In steps, as the clock does: one call processes at most 250 frames.
+    let run = |frames: u64, frame: &mut u64| {
+        for _ in 0..frames.div_ceil(50) {
+            *frame += 50;
+            engine.process_until(*frame);
+        }
+    };
+    run(50, &mut frame);
+    assert_eq!(last_out(&output), 0.5, "the microphone is silent: no ducking");
+    assert_eq!(engine.meters().strips[0].take().duck, 1.0);
+
+    *mic.lock().unwrap() = 0.3; // well above -40 dBFS
+    run(100, &mut frame);
+    let floor = 0.5 * db_to_gain(-duck.amount_db);
+    assert!((last_out(&output) - floor).abs() < 0.002, "down by 12 dB: {}", last_out(&output));
+    assert!(engine.meters().strips[0].take().duck < 0.3, "the meter shows the ducking");
+    assert_eq!(engine.meters().strips[1].take().duck, 1.0, "the microphone itself is not ducked");
+
+    // Quiet again: held for 300 ms, then back up over about 500 ms.
+    *mic.lock().unwrap() = 0.0;
+    run(250, &mut frame);
+    assert!((last_out(&output) - floor).abs() < 0.002, "still held: {}", last_out(&output));
+    run(6000, &mut frame); // the hold, then twelve release time constants
+    assert!((last_out(&output) - 0.5).abs() < 1e-4, "back up: {}", last_out(&output));
+
+    // No sample-to-sample step bigger than a smooth ramp would make.
+    let frames = output.0.lock().unwrap().clone();
+    let samples: Vec<f32> = frames.iter().flat_map(|f| f.iter().step_by(2).copied()).collect();
+    let largest = samples.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+    assert!(largest < 0.01, "a click: a step of {largest}");
+}
+
+/// A quiet, muted or self-pointing source ducks nothing; a source switched
+/// on while the engine runs does.
+#[test]
+fn ducking_follows_what_is_heard() {
+    // In steps, as the clock does: one call processes at most 250 frames.
+    let mut frame = 30_000;
+    let mut run = |engine: &Engine, frames: u64| {
+        for _ in 0..frames.div_ceil(50) {
+            frame += 50;
+            engine.process_until(frame);
+        }
+    };
+    // Below the threshold.
+    let (engine, output, mic) = ducking_rig(true);
+    *mic.lock().unwrap() = 0.005; // -46 dBFS
+    run(&engine, 200);
+    assert!((last_out(&output) - 0.505).abs() < 1e-4, "not ducked: {}", last_out(&output));
+
+    // Muted: heard by no one, so it ducks no one.
+    *mic.lock().unwrap() = 0.3;
+    engine.set_strip(1, StripParams { mute: true, ..Default::default() });
+    run(&engine, 200);
+    assert!((last_out(&output) - 0.5).abs() < 1e-4, "a muted source: {}", last_out(&output));
+
+    // Unmuted, it ducks the music; the microphone's own share is not lowered.
+    engine.set_strip(1, StripParams::default());
+    run(&engine, 200);
+    let expected = 0.5 * db_to_gain(-12.0) + 0.3;
+    assert!((last_out(&output) - expected).abs() < 0.002, "ducked music under the mic: {}", last_out(&output));
+
+    // Taking the source away by command brings the music back.
+    engine.set_duck_source(0, 1, false);
+    run(&engine, 3400);
+    assert!((last_out(&output) - 0.8).abs() < 1e-3, "{}", last_out(&output));
+
+    // A strip cannot duck itself.
+    engine.set_duck_source(1, 1, true);
+    run(&engine, 400);
+    assert!((last_out(&output) - 0.8).abs() < 1e-3, "{}", last_out(&output));
+    assert_eq!(engine.meters().strips[1].take().duck, 1.0);
 }

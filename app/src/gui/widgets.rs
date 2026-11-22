@@ -420,9 +420,36 @@ pub fn knob_row(
     range: RangeInclusive<f32>,
     unit: &str,
 ) -> bool {
+    knob_row_with_options(ui, id, label, value, range, unit, None).0
+}
+
+/// A knob row whose label opens more options: `options` is whether they are
+/// changed from their defaults, which shows the label in yellow. Returns
+/// whether the value changed and whether the label was clicked.
+pub fn knob_row_with_options(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    value: &mut f32,
+    range: RangeInclusive<f32>,
+    unit: &str,
+    options: Option<bool>,
+) -> (bool, bool) {
     let mut changed = false;
+    let mut clicked = false;
     ui.horizontal(|ui| {
-        ui.add_sized([38.0, 14.0], egui::Label::new(RichText::new(label).small()));
+        match options {
+            None => {
+                ui.add_sized([38.0, 14.0], egui::Label::new(RichText::new(label).small()));
+            }
+            Some(changed_options) => {
+                let text = RichText::new(label).small();
+                let text = if changed_options { text.color(super::LEMON) } else { text.underline() };
+                let hint = format!("{label} options{}", if changed_options { " (changed)" } else { "" });
+                clicked =
+                    ui.add_sized([38.0, 14.0], egui::Button::new(text).frame(false)).on_hover_text(hint).clicked();
+            }
+        }
         ui.spacing_mut().slider_width = STRIP_WIDTH - 88.0;
         let default = if *range.start() < 0.0 && *range.end() > 0.0 { 0.0 } else { *range.start() };
         let default = if label == "Ceiling" { -1.0 } else { default };
@@ -450,7 +477,7 @@ pub fn knob_row(
         }
         .show(ui, value);
     });
-    changed
+    (changed, clicked)
 }
 
 /// A hardware port's stream: its rate and drift correction, or why it is

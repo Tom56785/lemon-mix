@@ -12,8 +12,9 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 - **Bus returns**: a hardware strip can take a bus's output instead of a device, to process or re-route a mix without a virtual device in between. Lemon Mix refuses routes that would let a bus hear itself.
 - **Application capture**: an input strip can record what one application plays, such as Spotify or a browser, without changing its output device in Windows. The strip follows the application as it closes and starts again.
 - **Profiles**: named sets of strip and bus settings to switch between from the window or the command line.
+- **Ducking**: a strip can be lowered automatically while chosen other strips play, such as music under a microphone, with fade-down, hold and fade-up times you set.
 - **Remote control**: a [Stream Deck plugin](streamdeck/README.md) whose keys and dials show the mixer's state, a command line (`LemonMix.exe --control mute Mic`), and a [documented pipe protocol](docs/control-protocol.md) for your own tools.
-- **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise gate and compressor, peak meters with gain-reduction display.
+- **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise gate and compressor (each with finer options: range and timing for the gate; timing, knee, make-up and a manual threshold and ratio for the compressor), peak meters with gain-reduction display.
 - **Per bus**: fader, mute, mono, peak limiter, meters.
 - **Virtual devices** of three kinds, added, renamed and removed in the app: *input* (a playback device that apps play into), *output* (a recording device that apps record from, such as a microphone for Discord or OBS) and *loopback* (both, the recording side returning the playback side, like a classic virtual cable).
 - **Physical devices** in WASAPI shared mode, or exclusive mode for the lowest latency, with automatic reconnection when a device is unplugged and plugged back, changes format, or (when set to "Default device") when Windows' default changes.
@@ -62,6 +63,21 @@ Double-click a hardware strip's or bus's name to rename it, or a fader or knob t
 To capture an application, open a hardware strip's device menu and pick it under **Applications**, which lists the applications with sound (those playing now are marked). The strip records that program's sound, and that of the processes it starts (a browser's audio process, say), while the application still plays on its own device too. To hear an application only through Lemon Mix, set its output to a Lemon Mix virtual input in Windows' *App volume and device preferences* instead. While the application is closed the strip shows *Waiting for* it, and it picks the application up again when it starts. This needs Windows 10 version 2004 or later; DRM-protected playback may record as silence, and the Windows service, which runs outside your sign-in, may not be able to capture your applications.
 
 To feed a bus back into the mixer, open a hardware strip's device menu and choose **From A2** (or any bus) under **Mixer outputs**. The strip hears the bus 1 ms after it leaves the bus, after the bus's fader and limiter. A strip never sends to the bus it takes, and a route that would close a loop through other bus-fed strips is refused.
+
+## Noise gate and compressor
+
+Each strip's **Gate** and **Comp** knobs turn the noise gate and compressor on and set how strongly they work: the Gate knob sets the gate's threshold (-70 to -20 dBFS), and the Comp knob its threshold and ratio together. Select the **Gate** or **Comp** label for finer options; the label turns yellow once they differ from the defaults.
+
+- **Noise gate**: **Range** (how far it closes, 60 dB to begin with), **Attack** (how fast it opens), **Hold** (how long it stays open after the level drops) and **Release** (how fast it closes).
+- **Compressor**: **Attack**, **Release**, **Knee** (how gradually it starts around the threshold) and **Make-up** gain, automatic or fixed. **Set the threshold and ratio here** replaces the Comp knob's curve with your own; the knob then only turns the compressor on and off.
+
+The options are saved with the strip, in its profile.
+
+## Ducking
+
+Select **Duck** on a strip to make it duck: lower it while other strips play. Tick the strips that should duck it (a microphone, a call), and set how far it goes down (**Lower by**, 12 dB to begin with) and how loud a source must be to count (**Sensitivity**, -40 dBFS). **Fade down** is how long it takes to reach the lowered level (50 ms to begin with), **Hold** how long it stays down after the sources go quiet so it does not come up between words (300 ms), and **Fade up** how long it takes to come back (1 second). Each fade is even in dB and takes exactly that long; 0 makes it immediate.
+
+A strip's border turns purple while it is ducked, and its **Duck** button is lit while it has sources. A source counts as playing by its level as heard, after its fader, mute and solo, so muting the microphone stops the ducking. Ducking settings are saved with the strip, in its profile.
 
 ## Profiles
 

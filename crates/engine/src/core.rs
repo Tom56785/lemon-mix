@@ -21,9 +21,9 @@ use cables::event::Event;
 use cables::logging::Logger;
 use cables::usbip::busclock::current_bus_time;
 
-use crate::dsp::{Compressor, Eq3, Gate, Limiter, declick};
+use crate::dsp::{Compressor, Ducker, Eq3, Gate, Limiter, declick};
 use crate::meters::{MeterBank, RmsFollower};
-use crate::params::{BusParams, StripParams};
+use crate::params::{BusParams, DuckParams, StripParams};
 use crate::ring::BusRing;
 use crate::{FRAME_LEN, Frame, decode_frame, encode_frame};
 
@@ -66,6 +66,8 @@ pub struct StripSpec {
     pub params: StripParams,
     /// The buses this strip feeds, by index in the topology's buses.
     pub routes: Vec<usize>,
+    /// The strips that duck this one while they play, by index.
+    pub duck_sources: Vec<usize>,
 }
 
 pub struct BusSpec {
@@ -91,6 +93,8 @@ pub enum Command {
     Bus(usize, BusParams),
     /// Connects (true) or disconnects the strip and the bus at these indices.
     Route(usize, usize, bool),
+    /// Makes the second strip duck the first (true), or not, by index.
+    DuckSource(usize, usize, bool),
 }
 
 /// The engine's working state for a topology, built off the audio path.
@@ -99,6 +103,9 @@ pub struct Layout {
     buses: Vec<BusState>,
     /// Sized for this layout's strips and buses.
     meters: Arc<MeterBank>,
+    /// Each strip's side-chain level from the last frame, gathered before
+    /// a frame so strips can read each other's. Sized with the layout.
+    levels: Vec<f32>,
 }
 
 struct StripState {
@@ -117,6 +124,15 @@ struct StripState {
     last: [f32; 2],
     last_own: Option<u64>,
     rms: RmsFollower,
+    /// Whether each strip ducks this one, by strip index. Sized with the
+    /// layout.
+    duck_sources: Vec<bool>,
+    ducker: Ducker,
+    /// The ducking gain applied this frame.
+    duck: f32,
+    /// The strip's level as heard, after its fader, mute and solo but
+    /// before its own ducking: what ducks other strips.
+    level: f32,
 }
 
 struct BusState {
@@ -187,7 +203,12 @@ impl Engine {
         let meters = Arc::new(MeterBank::new(0, 0));
         Engine {
             core: Mutex::new(Core {
-                layout: Box::new(Layout { strips: Vec::new(), buses: Vec::new(), meters: Arc::clone(&meters) }),
+                layout: Box::new(Layout {
+                    strips: Vec::new(),
+                    buses: Vec::new(),
+                    meters: Arc::clone(&meters),
+                    levels: Vec::new(),
+                }),
                 commands: receiver,
                 garbage: garbage_tx,
                 next: None,
@@ -236,6 +257,7 @@ impl Engine {
                 }
             })
             .collect();
+        let strip_count = topology.strips.len();
         let strip_states: Vec<StripState> = topology
             .strips
             .into_iter()
@@ -244,6 +266,12 @@ impl Engine {
                 for bus in spec.routes {
                     if let Some(route) = routes.get_mut(bus) {
                         *route = true;
+                    }
+                }
+                let mut duck_sources = vec![false; strip_count];
+                for source in spec.duck_sources {
+                    if let Some(on) = duck_sources.get_mut(source) {
+                        *on = true;
                     }
                 }
                 let mut state = StripState {
@@ -257,6 +285,10 @@ impl Engine {
                     last: [0.0; 2],
                     last_own: None,
                     rms: RmsFollower::default(),
+                    duck_sources,
+                    ducker: Ducker::new(DuckParams::default()),
+                    duck: 1.0,
+                    level: 0.0,
                 };
                 state.apply(spec.params.sanitized());
                 // A new layout starts at its settings rather than ramping
@@ -267,7 +299,7 @@ impl Engine {
             })
             .collect();
         *lock(&self.meters) = Arc::clone(&meters);
-        let layout = Layout { strips: strip_states, buses: bus_states, meters };
+        let layout = Layout { strips: strip_states, buses: bus_states, meters, levels: vec![0.0; strip_count] };
         let _ = self.commands.send(Command::Layout(Box::new(layout)));
     }
 
@@ -279,6 +311,12 @@ impl Engine {
     /// send fades in or out across the next frame.
     pub fn set_route(&self, strip: usize, bus: usize, on: bool) {
         let _ = self.commands.send(Command::Route(strip, bus, on));
+    }
+
+    /// Makes strip `source` duck strip `strip` while it plays (`on`), or not,
+    /// by index. A strip does not duck itself.
+    pub fn set_duck_source(&self, strip: usize, source: usize, on: bool) {
+        let _ = self.commands.send(Command::DuckSource(strip, source, on));
     }
 
     pub fn set_bus(&self, index: usize, params: BusParams) {
@@ -386,11 +424,14 @@ impl StripState {
         if params.eq != self.params.eq {
             self.eq.set(params.eq);
         }
-        if params.gate != self.params.gate {
-            self.gate.set(params.gate);
+        if params.gate != self.params.gate || params.gate_options != self.params.gate_options {
+            self.gate.set(params.gate, params.gate_options);
         }
-        if params.comp != self.params.comp {
-            self.comp.set(params.comp);
+        if params.comp != self.params.comp || params.comp_options != self.params.comp_options {
+            self.comp.set(params.comp, params.comp_options);
+        }
+        if params.duck != self.params.duck {
+            self.ducker.set(params.duck);
         }
         self.params = params;
     }
@@ -427,17 +468,28 @@ impl Core {
                         *route = on;
                     }
                 }
+                Command::DuckSource(strip, source, on) => {
+                    if let Some(duck) = self.layout.strips.get_mut(strip).and_then(|s| s.duck_sources.get_mut(source)) {
+                        *duck = on && source != strip;
+                    }
+                }
             }
         }
     }
 
     fn process_frame(&mut self, frame_number: u64) {
         let Core { layout, frame, packet, .. } = self;
-        let Layout { strips, buses, meters } = &mut **layout;
+        let Layout { strips, buses, meters, levels } = &mut **layout;
         for bus in buses.iter_mut() {
             bus.mix = [0.0; FRAME_LEN];
         }
         let any_solo = strips.iter().any(|s| s.params.solo);
+        // Ducking reads the last frame's levels, so every strip sees the same
+        // ones whatever the order (and a strip that ducks another is heard a
+        // millisecond before it lowers it).
+        for (level, strip) in levels.iter_mut().zip(strips.iter()) {
+            *level = strip.level;
+        }
 
         for (index, strip) in strips.iter_mut().enumerate() {
             // The source.
@@ -491,13 +543,24 @@ impl Core {
                 }
             }
             let (peak, rms) = strip.rms.measure(frame);
+
+            // The level others are ducked by: as heard, before this strip's
+            // own ducking, so two strips ducking each other do not pump.
+            let heard = !strip.params.mute && !(any_solo && !strip.params.solo);
+            let gains = strip.params.channel_gains();
+            strip.level = if heard { (peak[0] * gains[0]).max(peak[1] * gains[1]) } else { 0.0 };
+            let threshold = strip.ducker.threshold();
+            let triggered = strip.duck_sources.iter().zip(levels.iter()).any(|(&on, &level)| on && level >= threshold);
+            strip.duck = strip.ducker.step(triggered);
             if let Some(meter) = meters.strips.get(index) {
                 meter.record(peak, rms, reduction);
+                meter.record_duck(strip.duck);
             }
 
             // The sends, ramped across the frame when they change.
             for (bus_index, bus) in buses.iter_mut().enumerate() {
-                let target = strip.params_target(bus_index, any_solo);
+                let [left, right] = strip.params_target(bus_index, any_solo);
+                let target = [left * strip.duck, right * strip.duck];
                 let Some(send) = strip.sends.get_mut(bus_index) else {
                     continue;
                 };

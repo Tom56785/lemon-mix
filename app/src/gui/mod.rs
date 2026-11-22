@@ -27,12 +27,34 @@ use self::shell::{call_service_within, run_job};
 use crate::mixer::MixerHost;
 use crate::platform::control;
 use crate::platform::service::ServiceState;
-use crate::protocol::{AppView, BusView, CableView, DeviceView, MixerCommand, Request, StripView, Tone};
+use crate::protocol::{
+    AppView, BusView, CableView, DeviceView, Meter, MixerCommand, Request, StripParams, StripView, Tone,
+};
 
 const OK_COLOR: Color32 = Color32::from_rgb(64, 180, 80);
 const PENDING_COLOR: Color32 = Color32::from_rgb(230, 160, 30);
 const ERROR_COLOR: Color32 = Color32::from_rgb(220, 70, 60);
 const LEMON: Color32 = Color32::from_rgb(247, 210, 62);
+/// Ducking: the Duck button while a strip has sources, and its border while it
+/// is being lowered.
+const DUCK_COLOR: Color32 = Color32::from_rgb(150, 100, 230);
+/// A strip counts as ducked once lowered by more than this (about 0.25 dB).
+const DUCKED_BELOW: f32 = 0.97;
+
+/// The colour of a strip's border: red while muted, purple while ducked,
+/// yellow while soloed, and none otherwise. A muted strip is silent whatever
+/// else applies; ducking is shown over solo as it changes as you listen.
+fn strip_highlight(params: &StripParams, meter: &Meter) -> Option<Color32> {
+    if params.mute {
+        Some(ERROR_COLOR)
+    } else if meter.duck < DUCKED_BELOW {
+        Some(DUCK_COLOR)
+    } else if params.solo {
+        Some(PENDING_COLOR)
+    } else {
+        None
+    }
+}
 /// How long a control the user just changed keeps its own value rather than
 /// the mixer's, so a fader being dragged does not jump back to an older one.
 const EDIT_HOLD: Duration = Duration::from_millis(600);
@@ -161,6 +183,10 @@ struct App {
     renaming: Option<(String, String)>,
     /// The profiles dialog, while it is open.
     profile_dialog: Option<ProfileDialog>,
+    /// The strip whose ducking dialog is open.
+    duck_dialog: Option<String>,
+    /// The strip and processor whose options dialog is open.
+    processing_dialog: Option<(String, Processor)>,
     editing_label: Option<(String, String)>,
     _tray: Option<tray_icon::TrayIcon>,
 }
@@ -196,6 +222,8 @@ impl App {
             new_cable_kind: "loopback".into(),
             renaming: None,
             profile_dialog: None,
+            duck_dialog: None,
+            processing_dialog: None,
             editing_label: None,
             _tray: tray,
         };
@@ -243,6 +271,7 @@ impl App {
             {
                 strip.params = local.params.clone();
                 strip.routes = local.routes.clone();
+                strip.duck_by = local.duck_by.clone();
                 strip.label = local.label.clone();
                 if let (Some(port), Some(local_port)) = (&mut strip.port, &local.port) {
                     port.endpoint = local_port.endpoint.clone();
@@ -365,6 +394,8 @@ impl eframe::App for App {
             ui.add_enabled_ui(!modal && !busy, |ui| self.mixer_panel(ui));
         });
         self.dialogs(ctx);
+        self.duck_dialog_ui(ctx);
+        self.processing_dialog_ui(ctx);
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 }
@@ -509,15 +540,8 @@ impl App {
             ui.label(RichText::new("INPUTS").small().strong().color(Color32::GRAY));
             ui.horizontal_top(|ui| {
                 for index in 0..self.strips.len() {
-                    // Muted wins over soloed: a muted strip is silent either way.
-                    let p = &self.strips[index].params;
-                    let highlight = if p.mute {
-                        Some(ERROR_COLOR)
-                    } else if p.solo {
-                        Some(PENDING_COLOR)
-                    } else {
-                        None
-                    };
+                    let strip = &self.strips[index];
+                    let highlight = strip_highlight(&strip.params, &strip.meter);
                     widgets::strip_frame(ui, highlight, |ui| self.strip_ui(ui, index));
                 }
                 if widgets::add_column(ui, "+ Input", "Add a hardware input strip") {
@@ -702,13 +726,45 @@ impl App {
                         params.mono = !params.mono;
                         true
                     };
+                let ducks = !strip.duck_by.is_empty();
+                let hint = if ducks { "Ducking: lowered while other strips play" } else { "Set up ducking" };
+                if widgets::toggle(ui, "Duck", ducks, DUCK_COLOR).on_hover_text(hint).clicked() {
+                    self.duck_dialog = Some(strip.id.clone());
+                }
             });
             ui.add_space(2.0);
             changed |= widgets::knob_row(ui, &strip.id, "Bass", &mut params.eq[0], -12.0..=12.0, "dB");
             changed |= widgets::knob_row(ui, &strip.id, "Mid", &mut params.eq[1], -12.0..=12.0, "dB");
             changed |= widgets::knob_row(ui, &strip.id, "Treble", &mut params.eq[2], -12.0..=12.0, "dB");
-            changed |= widgets::knob_row(ui, &strip.id, "Gate", &mut params.gate, 0.0..=10.0, "");
-            changed |= widgets::knob_row(ui, &strip.id, "Comp", &mut params.comp, 0.0..=10.0, "");
+            // The Gate and Comp labels open their options.
+            let gate_changed = params.gate_options != engine::GateOptions::default();
+            let (moved, open_gate) = widgets::knob_row_with_options(
+                ui,
+                &strip.id,
+                "Gate",
+                &mut params.gate,
+                0.0..=10.0,
+                "",
+                Some(gate_changed),
+            );
+            changed |= moved;
+            let comp_changed = params.comp_options != engine::CompOptions::default();
+            let (moved, open_comp) = widgets::knob_row_with_options(
+                ui,
+                &strip.id,
+                "Comp",
+                &mut params.comp,
+                0.0..=10.0,
+                "",
+                Some(comp_changed),
+            );
+            changed |= moved;
+            if open_gate {
+                self.processing_dialog = Some((strip.id.clone(), Processor::Gate));
+            }
+            if open_comp {
+                self.processing_dialog = Some((strip.id.clone(), Processor::Compressor));
+            }
             if let Some(port) = &strip.port {
                 widgets::port_status(ui, port);
             }
@@ -1020,6 +1076,342 @@ impl App {
     }
 }
 
+/// One row of an options dialog: its label, with a hint, and its controls.
+fn option_row(ui: &mut egui::Ui, label: &str, hint: &str, add: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
+    ui.horizontal(|ui| {
+        ui.add_sized([90.0, 18.0], egui::Label::new(label)).on_hover_text(hint);
+        add(ui)
+    })
+    .inner
+}
+
+/// A number box in an options dialog, kept apart by the strip and `key`.
+fn option_number(
+    ui: &mut egui::Ui,
+    strip: &str,
+    key: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f32,
+    unit: &str,
+) -> bool {
+    let decimals = if speed < 1.0 { 1 } else { 0 };
+    let format = |v: f32| format!("{v:.decimals$} {unit}");
+    widgets::NumberBox {
+        id: egui::Id::new((strip, key)),
+        width: 76.0,
+        range,
+        speed,
+        format: &format,
+        edit_text: &|v| format!("{v:.decimals$}"),
+        parse: &widgets::parse_number,
+        hint: "Click to type a value, or drag",
+    }
+    .show(ui, value)
+}
+
+/// A slider and a number box for one setting of an options dialog.
+fn option_slider(
+    ui: &mut egui::Ui,
+    strip: &str,
+    key: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f32,
+    unit: &str,
+) -> bool {
+    let slider = ui.add(egui::Slider::new(value, range.clone()).show_value(false));
+    let typed = option_number(ui, strip, key, value, range, speed, unit);
+    slider.changed() | typed
+}
+
+/// A row with a slider over the usual values and a number box that takes the
+/// whole range, for durations that are mostly short but may be long.
+#[allow(clippy::too_many_arguments)]
+fn option_slider_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    hint: &str,
+    (strip, key): (&str, &str),
+    value: &mut f32,
+    usual: std::ops::RangeInclusive<f32>,
+    range: std::ops::RangeInclusive<f32>,
+    unit: &str,
+) -> bool {
+    option_row(ui, label, hint, |ui| {
+        // A longer value typed in shows the slider at its end, unchanged.
+        let slider = ui.add(egui::Slider::new(value, usual).show_value(false).clamping(egui::SliderClamping::Never));
+        let typed = option_number(ui, strip, key, value, range, 5.0, unit);
+        slider.changed() | typed
+    })
+}
+
+/// The processor an options dialog is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Processor {
+    Gate,
+    Compressor,
+}
+
+impl App {
+    /// A strip's noise gate or compressor options. Not modal, like the
+    /// ducking dialog; changes apply at once.
+    fn processing_dialog_ui(&mut self, ctx: &egui::Context) {
+        let Some((id, processor)) = self.processing_dialog.clone() else {
+            return;
+        };
+        let Some(index) = self.strips.iter().position(|s| s.id == id) else {
+            self.processing_dialog = None;
+            return;
+        };
+        let strip = self.strips[index].clone();
+        let mut params = strip.params.clone();
+        let mut changed = false;
+        let mut open = true;
+        let title = match processor {
+            Processor::Gate => format!("Noise gate: {}", strip.label),
+            Processor::Compressor => format!("Compressor: {}", strip.label),
+        };
+        egui::Window::new(title)
+            .id(egui::Id::new("processing dialog"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_pos(ctx.screen_rect().center() - Vec2::new(170.0, 150.0))
+            .show(ctx, |ui| {
+                ui.set_width(330.0);
+                let id = id.as_str();
+                let grey = |ui: &mut egui::Ui, text: String| {
+                    ui.label(RichText::new(text).small().color(Color32::GRAY));
+                };
+                match processor {
+                    Processor::Gate => {
+                        let g = &mut params.gate_options;
+                        if params.gate > 0.0 {
+                            let threshold = engine::dsp::gate_threshold_db(params.gate);
+                            grey(ui, format!("Threshold {threshold:.0} dBFS, set by the strip's Gate knob."));
+                        } else {
+                            grey(ui, "The gate is off: turn up the strip's Gate knob to set its threshold.".into());
+                        }
+                        ui.add_space(4.0);
+                        changed |= option_row(ui, "Range", "How far the gate closes below the threshold", |ui| {
+                            option_slider(ui, id, "gate range", &mut g.range_db, engine::params::GATE_RANGE_DB, 0.2, "dB")
+                        });
+                        changed |= option_row(ui, "Attack", "How fast it opens once the level passes the threshold", |ui| {
+                            option_number(ui, id, "gate attack", &mut g.attack_ms, engine::params::GATE_ATTACK_MS, 0.1, "ms")
+                        });
+                        changed |= option_row(ui, "Hold", "How long it stays open after the level drops", |ui| {
+                            option_number(ui, id, "gate hold", &mut g.hold_ms, engine::params::GATE_HOLD_MS, 5.0, "ms")
+                        });
+                        changed |= option_row(ui, "Release", "How fast it closes after the hold", |ui| {
+                            option_number(ui, id, "gate release", &mut g.release_ms, engine::params::GATE_RELEASE_MS, 5.0, "ms")
+                        });
+                        if ui.button("Reset to defaults").clicked() && *g != engine::GateOptions::default() {
+                            *g = engine::GateOptions::default();
+                            changed = true;
+                        }
+                    }
+                    Processor::Compressor => {
+                        let c = &mut params.comp_options;
+                        if ui
+                            .checkbox(&mut c.manual, "Set the threshold and ratio here")
+                            .on_hover_text("The strip's Comp knob then only turns the compressor on and off")
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if c.manual {
+                            changed |= option_row(ui, "Threshold", "The level above which it reduces the gain", |ui| {
+                                let range = engine::params::COMP_THRESHOLD_DB;
+                                option_slider(ui, id, "comp threshold", &mut c.threshold_db, range, 0.2, "dBFS")
+                            });
+                            changed |= option_row(ui, "Ratio", "How much it reduces: 4 means 4 dB over becomes 1 dB", |ui| {
+                                option_slider(ui, id, "comp ratio", &mut c.ratio, engine::params::COMP_RATIO, 0.05, ": 1")
+                            });
+                            if params.comp <= 0.0 {
+                                grey(ui, "The compressor is off: turn up the strip's Comp knob to turn it on.".into());
+                            }
+                        } else {
+                            let (threshold, ratio) = engine::dsp::comp_curve(params.comp);
+                            grey(
+                                ui,
+                                if params.comp > 0.0 {
+                                    format!("Threshold {threshold:.1} dBFS and ratio {ratio:.1}:1, set by the strip's Comp knob.")
+                                } else {
+                                    "The compressor is off: the strip's Comp knob turns it on and sets its curve.".into()
+                                },
+                            );
+                        }
+                        ui.add_space(4.0);
+                        changed |= option_row(ui, "Attack", "How fast it reduces the gain once the level passes the threshold", |ui| {
+                            option_number(ui, id, "comp attack", &mut c.attack_ms, engine::params::COMP_ATTACK_MS, 0.1, "ms")
+                        });
+                        changed |= option_row(ui, "Release", "How fast the gain recovers", |ui| {
+                            option_number(ui, id, "comp release", &mut c.release_ms, engine::params::COMP_RELEASE_MS, 5.0, "ms")
+                        });
+                        changed |= option_row(ui, "Knee", "How gradually it starts around the threshold; 0 is a hard knee", |ui| {
+                            option_number(ui, id, "comp knee", &mut c.knee_db, engine::params::COMP_KNEE_DB, 0.1, "dB")
+                        });
+                        changed |= option_row(ui, "Make-up", "Gain added back after compression", |ui| {
+                            let mut automatic = c.makeup_db.is_none();
+                            let mut changed = false;
+                            if ui.checkbox(&mut automatic, "Automatic").changed() {
+                                c.makeup_db = if automatic { None } else { Some(0.0) };
+                                changed = true;
+                            }
+                            if let Some(makeup) = &mut c.makeup_db {
+                                changed |= option_number(ui, id, "comp makeup", makeup, engine::params::COMP_MAKEUP_DB, 0.1, "dB");
+                            }
+                            changed
+                        });
+                        if ui.button("Reset to defaults").clicked() && *c != engine::CompOptions::default() {
+                            *c = engine::CompOptions::default();
+                            changed = true;
+                        }
+                    }
+                }
+                ui.add_space(4.0);
+                let reduction = 20.0 * strip.meter.reduction.max(1e-6).log10();
+                let text = if reduction < -0.1 {
+                    format!("Gain reduction now (gate and compressor): {reduction:.1} dB")
+                } else {
+                    "No gain reduction now".to_string()
+                };
+                ui.label(RichText::new(text).color(if reduction < -0.1 { Color32::from_rgb(90, 160, 230) } else { Color32::GRAY }));
+            });
+        if changed {
+            self.strips[index].params = params.clone();
+            self.mixer(&id, MixerCommand::Strip { id: id.clone(), params });
+        }
+        if !open {
+            self.processing_dialog = None;
+        }
+    }
+
+    /// A strip's ducking: the strips that lower it while they play, by how
+    /// much, and (under Timing) how fast. Not modal, so the mixer can be used
+    /// while it is open; changes apply at once.
+    fn duck_dialog_ui(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.duck_dialog.clone() else {
+            return;
+        };
+        let Some(index) = self.strips.iter().position(|s| s.id == id) else {
+            // The strip went (a removed device, say).
+            self.duck_dialog = None;
+            return;
+        };
+        let strip = self.strips[index].clone();
+        let others: Vec<(String, String)> =
+            self.strips.iter().filter(|s| s.id != id).map(|s| (s.id.clone(), s.label.clone())).collect();
+        let mut open = true;
+        let mut sources = strip.duck_by.clone();
+        let mut params = strip.params.clone();
+        let mut sources_changed = false;
+        let mut params_changed = false;
+        egui::Window::new(format!("Ducking: {}", strip.label))
+            .id(egui::Id::new("duck dialog"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_pos(ctx.screen_rect().center() - Vec2::new(170.0, 160.0))
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.label(RichText::new("Lower this strip while any of these play:").strong());
+                if others.is_empty() {
+                    ui.label(RichText::new("There are no other strips.").italics());
+                }
+                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                    for (other, label) in &others {
+                        let mut on = sources.contains(other);
+                        let text = if label == other { other.clone() } else { format!("{label} ({other})") };
+                        if ui.checkbox(&mut on, text).changed() {
+                            sources.retain(|s| s != other);
+                            if on {
+                                sources.push(other.clone());
+                            }
+                            sources_changed = true;
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                let duck = &mut params.duck;
+                let id = id.as_str();
+                params_changed |=
+                    option_row(ui, "Lower by", "How far the strip goes down while a source plays", |ui| {
+                        option_slider(
+                            ui,
+                            id,
+                            "duck amount",
+                            &mut duck.amount_db,
+                            0.0..=engine::params::MAX_DUCK_DB,
+                            0.2,
+                            "dB",
+                        )
+                    });
+                params_changed |= option_row(
+                    ui,
+                    "Sensitivity",
+                    "How loud a source must be to count as playing, in dBFS: lower hears quieter sources",
+                    |ui| {
+                        let range = engine::params::MIN_DUCK_THRESHOLD_DB..=0.0;
+                        option_slider(ui, id, "duck threshold", &mut duck.threshold_db, range, 0.2, "dBFS")
+                    },
+                );
+                // How long each change takes, end to end.
+                params_changed |= option_slider_row(
+                    ui,
+                    "Fade down",
+                    "How long it takes to go down to the lowered level once a source plays; 0 is at once",
+                    (id, "duck fade down"),
+                    &mut duck.fade_down_ms,
+                    0.0..=1000.0,
+                    engine::params::DUCK_FADE_DOWN_MS,
+                    "ms",
+                );
+                params_changed |= option_slider_row(
+                    ui,
+                    "Hold",
+                    "How long it stays down after the sources go quiet, so it does not come up between words",
+                    (id, "duck hold"),
+                    &mut duck.hold_ms,
+                    0.0..=2000.0,
+                    engine::params::DUCK_HOLD_MS,
+                    "ms",
+                );
+                params_changed |= option_slider_row(
+                    ui,
+                    "Fade up",
+                    "How long it takes to come back up after the hold; 0 is at once",
+                    (id, "duck fade up"),
+                    &mut duck.fade_up_ms,
+                    0.0..=3000.0,
+                    engine::params::DUCK_FADE_UP_MS,
+                    "ms",
+                );
+                ui.add_space(4.0);
+                let (color, status) = if strip.meter.duck < DUCKED_BELOW {
+                    (DUCK_COLOR, format!("Ducking now: {:.1} dB", 20.0 * strip.meter.duck.max(1e-6).log10()))
+                } else if sources.is_empty() {
+                    (Color32::GRAY, "Off: choose the strips that duck this one".to_string())
+                } else {
+                    (Color32::GRAY, "Not ducking now".to_string())
+                };
+                ui.label(RichText::new(status).color(color));
+            });
+        if sources_changed {
+            self.strips[index].duck_by = sources.clone();
+            self.mixer(&id, MixerCommand::Duck { strip: id.clone(), sources });
+        }
+        if params_changed {
+            self.strips[index].params = params.clone();
+            self.mixer(&id, MixerCommand::Strip { id: id.clone(), params });
+        }
+        if !open {
+            self.duck_dialog = None;
+        }
+    }
+}
+
 /// The profiles dialog's own state: the new profile being named.
 #[derive(Default)]
 struct ProfileDialog {
@@ -1158,6 +1550,7 @@ mod tests {
                 label: "Hardware 1".into(),
                 params: StripParams::default(),
                 routes: vec!["A1".into()],
+                duck_by: Vec::new(),
                 meter: Default::default(),
                 port: Some(PortView::default()),
             };
@@ -1180,6 +1573,8 @@ mod tests {
                 new_cable_kind: "loopback".into(),
                 renaming: None,
                 profile_dialog: None,
+                duck_dialog: None,
+                processing_dialog: None,
                 editing_label: None,
                 _tray: None,
             };
@@ -1188,8 +1583,18 @@ mod tests {
 
         fn frame(&mut self, events: Vec<egui::Event>) {
             for request in self.requests.try_iter() {
-                if let Request::Mixer { command: MixerCommand::Strip { params, .. } } = &request {
-                    self.snapshot.strips[0].params = params.clone();
+                match &request {
+                    Request::Mixer { command: MixerCommand::Strip { id, params } } => {
+                        if let Some(s) = self.snapshot.strips.iter_mut().find(|s| &s.id == id) {
+                            s.params = params.clone();
+                        }
+                    }
+                    Request::Mixer { command: MixerCommand::Duck { strip, sources } } => {
+                        if let Some(s) = self.snapshot.strips.iter_mut().find(|s| &s.id == strip) {
+                            s.duck_by = sources.clone();
+                        }
+                    }
+                    _ => {}
                 }
                 self.sent.push(request);
             }
@@ -1210,6 +1615,8 @@ mod tests {
                 app.refresh();
                 egui::CentralPanel::default().show(ctx, |ui| app.mixer_panel(ui));
                 app.dialogs(ctx);
+                app.duck_dialog_ui(ctx);
+                app.processing_dialog_ui(ctx);
             });
         }
 
@@ -1280,6 +1687,115 @@ mod tests {
         );
         h.frame(vec![key(egui::Key::Escape, true)]);
         assert!(h.app.profile_dialog.is_none(), "Escape closes it");
+    }
+
+    #[test]
+    fn borders_show_mute_then_ducking_then_solo() {
+        let quiet = Meter::default();
+        let ducked = Meter { duck: 0.25, ..Default::default() };
+        let params = |mute, solo| StripParams { mute, solo, ..Default::default() };
+        assert_eq!(strip_highlight(&params(false, false), &quiet), None);
+        assert_eq!(strip_highlight(&params(false, false), &ducked), Some(DUCK_COLOR), "purple while ducked");
+        assert_eq!(strip_highlight(&params(false, true), &quiet), Some(PENDING_COLOR));
+        assert_eq!(strip_highlight(&params(false, true), &ducked), Some(DUCK_COLOR));
+        assert_eq!(strip_highlight(&params(true, true), &ducked), Some(ERROR_COLOR), "muted wins");
+        let barely = Meter { duck: 0.99, ..Default::default() };
+        assert_eq!(strip_highlight(&params(false, false), &barely), None, "a fraction of a dB is not shown");
+    }
+
+    /// The ducking dialog sends the sources ticked and the amount typed, and
+    /// closes when its strip goes.
+    #[test]
+    fn the_ducking_dialog_sets_sources_and_amount() {
+        let mut h = Harness::new();
+        let mut mic = h.snapshot.strips[0].clone();
+        (mic.id, mic.key, mic.label) = ("H2".into(), "k2".into(), "Mic".into());
+        h.snapshot.strips.push(mic);
+        h.frame(vec![]);
+        h.app.duck_dialog = Some("H1".into());
+        h.frame(vec![]);
+        h.frame(vec![]);
+        // Tick "Mic (H2)": the list is at the top of the dialog.
+        let ducked_by_mic = |sent: &[Request]| {
+            sent.iter().any(|r| matches!(r, Request::Mixer { command: MixerCommand::Duck { strip, sources } } if strip == "H1" && sources == &["H2".to_string()]))
+        };
+        'scan: for y in (150..360).step_by(4) {
+            for x in (240..520).step_by(8) {
+                h.frame(click(egui::Pos2::new(x as f32, y as f32)));
+                h.frame(vec![]);
+                if ducked_by_mic(&h.sent) {
+                    break 'scan;
+                }
+            }
+        }
+        assert!(ducked_by_mic(&h.sent), "{:?}", h.sent);
+        assert_eq!(h.app.strips[0].duck_by, ["H2"], "shown at once");
+        // Type an amount into the first number box.
+        h.sent.clear();
+        h.find_editable(300..580, 200..460); // inside the dialog
+        h.frame(vec![egui::Event::Text("20".into())]);
+        h.frame(vec![key(egui::Key::Enter, true)]);
+        h.frame(vec![]);
+        let amount = h.sent.iter().find_map(|r| match r {
+            Request::Mixer { command: MixerCommand::Strip { id, params } } if id == "H1" => Some(params.duck.amount_db),
+            _ => None,
+        });
+        assert_eq!(amount, Some(20.0), "{:?}", h.sent);
+        // The strip goes: so does the dialog.
+        h.snapshot.strips.retain(|s| s.id != "H1");
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(h.app.duck_dialog.is_none());
+    }
+
+    /// The Gate label opens the gate's options; a typed range is sent. The
+    /// compressor's manual curve is sent when ticked.
+    #[test]
+    fn the_processing_dialogs_set_their_options() {
+        let mut h = Harness::new();
+        h.frame(vec![]);
+        h.frame(vec![]);
+        'scan: for y in (250..480).step_by(3) {
+            for x in (5..60).step_by(5) {
+                h.frame(click(egui::Pos2::new(x as f32, y as f32)));
+                h.frame(vec![]);
+                if h.app.processing_dialog.is_some() {
+                    break 'scan;
+                }
+            }
+        }
+        assert_eq!(h.app.processing_dialog, Some(("H1".into(), Processor::Gate)), "the Gate label opened it");
+        h.sent.clear();
+        // The Range box, first in the dialog, below its title bar (whose close
+        // button is at the top right).
+        h.find_editable(300..590, 230..460);
+        h.frame(vec![egui::Event::Text("30".into())]);
+        h.frame(vec![key(egui::Key::Enter, true)]);
+        h.frame(vec![]);
+        let range = h.sent.iter().find_map(|r| match r {
+            Request::Mixer { command: MixerCommand::Strip { params, .. } } => Some(params.gate_options.range_db),
+            _ => None,
+        });
+        assert_eq!(range, Some(30.0), "{:?}", h.sent);
+
+        h.app.processing_dialog = Some(("H1".into(), Processor::Compressor));
+        h.sent.clear();
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let manual = |sent: &[Request]| {
+            sent.iter().any(|r| matches!(r, Request::Mixer { command: MixerCommand::Strip { params, .. } } if params.comp_options.manual))
+        };
+        'tick: for y in (226..300).step_by(3) {
+            for x in (290..590).step_by(8) {
+                h.frame(click(egui::Pos2::new(x as f32, y as f32)));
+                h.frame(vec![]);
+                if manual(&h.sent) {
+                    break 'tick;
+                }
+            }
+        }
+        assert!(manual(&h.sent), "{:?}", h.sent);
+        assert!(h.app.strips[0].params.comp_options.manual, "shown at once");
     }
 
     #[test]

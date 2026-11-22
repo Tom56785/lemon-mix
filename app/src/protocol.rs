@@ -160,6 +160,12 @@ pub enum MixerCommand {
     RemoveBus {
         id: String,
     },
+    /// Set the strips that duck a strip while they play (its ducking settings
+    /// are in its `params`).
+    Duck {
+        strip: String,
+        sources: Vec<String>,
+    },
     /// Make a profile, from the current settings or a new configuration's,
     /// and switch to it.
     CreateProfile {
@@ -216,12 +222,27 @@ pub struct PortView {
     pub overruns: u64,
 }
 
-/// A meter reading: peak and RMS per channel, and gain reduction.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// A meter reading: peak and RMS per channel, gain reduction, and ducking.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meter {
     pub peak: [f32; 2],
     pub rms: [f32; 2],
     pub reduction: f32,
+    /// How far ducking lowers the strip, as a linear factor: 1.0 is not at
+    /// all. Always 1.0 for buses.
+    #[serde(default = "unity")]
+    pub duck: f32,
+}
+
+fn unity() -> f32 {
+    1.0
+}
+
+impl Default for Meter {
+    /// Silence, with nothing reduced or ducked.
+    fn default() -> Meter {
+        Meter { peak: [0.0; 2], rms: [0.0; 2], reduction: 1.0, duck: 1.0 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -235,6 +256,9 @@ pub struct StripView {
     pub label: String,
     pub params: StripParams,
     pub routes: Vec<String>,
+    /// The strips that duck it while they play, by ID.
+    #[serde(default)]
+    pub duck_by: Vec<String>,
     pub meter: Meter,
     /// The device of a hardware strip.
     pub port: Option<PortView>,
@@ -317,6 +341,15 @@ impl Reply {
 mod tests {
     use super::*;
 
+    /// A meter without a ducking reading, as an older Lemon Mix sends, is
+    /// not ducked.
+    #[test]
+    fn meters_default_to_not_ducked() {
+        let meter: Meter = serde_json::from_str(r#"{"peak":[0.1,0.1],"rms":[0.0,0.0],"reduction":1.0}"#).unwrap();
+        assert_eq!(meter.duck, 1.0);
+        assert_eq!((Meter::default().duck, Meter::default().reduction), (1.0, 1.0));
+    }
+
     #[test]
     fn requests_round_trip_as_json() {
         let requests = [
@@ -334,6 +367,7 @@ mod tests {
                 command: MixerCommand::Device { id: "A1".into(), endpoint: "default".into(), exclusive: true },
             },
             Request::Mixer { command: MixerCommand::AddStrip },
+            Request::Mixer { command: MixerCommand::Duck { strip: "V2".into(), sources: vec!["H1".into()] } },
             Request::Mixer { command: MixerCommand::RemoveBus { id: "A12".into() } },
             Request::Control { action: ControlAction::Route { strip: "strip:Mic".into(), bus: "A2".into(), on: None } },
             Request::Control { action: ControlAction::AdjustGain { target: "8f3a2c1d9e0b".into(), db: -1.5 } },

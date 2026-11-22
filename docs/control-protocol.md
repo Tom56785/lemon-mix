@@ -88,7 +88,7 @@ The connection stays open, and the server sends one event per line until you clo
 
   ```json
   { "event": "meters",
-    "strips": [{ "key": "5f06d376711a", "peak": [0.5, 0.4], "rms": [0.2, 0.18], "reduction": 1.0 }],
+    "strips": [{ "key": "5f06d376711a", "peak": [0.5, 0.4], "rms": [0.2, 0.18], "reduction": 1.0, "duck": 1.0 }],
     "buses": [ ... ] }
   ```
 
@@ -107,6 +107,14 @@ The window uses `{"op": "mixer", "command": {...}}` for everything it changes. I
 ```
 
 The strip then hears the bus as it left the bus, 1 ms later, with no virtual device in between. Lemon Mix refuses a change that would let a bus hear itself, and turns off the strip's send to the bus it takes.
+
+A strip is ducked, lowered while other strips play, by the strips named with `duck` (`strip` and `sources`, by ID; an empty list turns it off). How far and how fast are in its `params.duck`: `amount_db`, `threshold_db`, `fade_down_ms`, `hold_ms` and `fade_up_ms` (each fade's whole duration), set with `strip` like its other settings:
+
+```json
+{ "op": "mixer", "command": { "cmd": "duck", "strip": "V2", "sources": ["H1"] } }
+```
+
+Likewise the noise gate's finer settings are in `params.gate_options` (`range_db`, `attack_ms`, `hold_ms`, `release_ms`) and the compressor's in `params.comp_options` (`attack_ms`, `release_ms`, `knee_db`, `makeup_db`, which is `null` for automatic, and `manual` with `threshold_db` and `ratio`).
 
 Profiles are managed with `create_profile` (`name`, and `from_defaults` to start from a new configuration's settings rather than the current ones; it switches to the new profile), `switch_profile` (`name`) and `delete_profile` (`name`, not the active one):
 
@@ -142,7 +150,7 @@ The fields a controller usually needs (the full set is `Snapshot` in `app/src/pr
 }
 ```
 
-- `routes` lists the IDs of the buses a strip sends to.
+- `routes` lists the IDs of the buses a strip sends to. `duck_by` lists the IDs of the strips that duck it, and its meter's `duck` is how far it is ducked now, as a linear factor (1.0 is not at all).
 - `port` is present only for hardware strips and buses. `state` is `off`, `opening`, `running` or `failed`, or `bus` for a strip fed from a bus; in that case `device_name` names the bus. A strip capturing an application is `running` while it captures, with the application's name in `device_name`, and `failed` while it waits for the application to start.
 - `apps` lists the applications with sound: `{ "exe": "Spotify.exe", "name": "Spotify", "active": true }`, where `active` means playing now.
 - `profile` is the active profile and `profiles` every profile, in alphabetical order.

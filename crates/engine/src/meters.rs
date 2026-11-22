@@ -13,14 +13,26 @@ pub struct Meter {
     /// Gain reduction by the gate or compressor (strips) or limiter (buses),
     /// as a linear factor; 1.0 is none. Stored as f32 bits.
     reduction: AtomicU32,
+    /// How far ducking lowers a strip, as a linear factor; 1.0 is none.
+    /// Stored as f32 bits.
+    duck: AtomicU32,
 }
 
 /// What a meter showed since it was last read.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterReading {
     pub peak: [f32; 2],
     pub rms: [f32; 2],
     pub reduction: f32,
+    /// The ducking gain; 1.0 is none.
+    pub duck: f32,
+}
+
+impl Default for MeterReading {
+    /// Silence, with nothing reduced or ducked.
+    fn default() -> MeterReading {
+        MeterReading { peak: [0.0; 2], rms: [0.0; 2], reduction: 1.0, duck: 1.0 }
+    }
 }
 
 impl Meter {
@@ -32,15 +44,25 @@ impl Meter {
         self.reduction.store(reduction.to_bits(), Ordering::Relaxed);
     }
 
+    /// Records how far ducking lowers the strip.
+    pub fn record_duck(&self, gain: f32) {
+        self.duck.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
     /// Reads the meter and resets its peaks.
     pub fn take(&self) -> MeterReading {
         let peak = |c: usize| f32::from_bits(self.peak[c].swap(0, Ordering::Relaxed));
         let rms = |c: usize| f32::from_bits(self.rms[c].load(Ordering::Relaxed));
-        let reduction = f32::from_bits(self.reduction.load(Ordering::Relaxed));
+        // Zero bits are a meter never written: nothing reduced or ducked.
+        let factor = |a: &AtomicU32| match f32::from_bits(a.load(Ordering::Relaxed)) {
+            0.0 => 1.0,
+            value => value,
+        };
         MeterReading {
             peak: [peak(0), peak(1)],
             rms: [rms(0), rms(1)],
-            reduction: if reduction == 0.0 { 1.0 } else { reduction },
+            reduction: factor(&self.reduction),
+            duck: factor(&self.duck),
         }
     }
 
@@ -50,6 +72,7 @@ impl Meter {
             self.rms[channel].store(0, Ordering::Relaxed);
         }
         self.reduction.store(1f32.to_bits(), Ordering::Relaxed);
+        self.duck.store(1f32.to_bits(), Ordering::Relaxed);
     }
 }
 
