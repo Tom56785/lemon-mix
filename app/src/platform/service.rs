@@ -244,6 +244,12 @@ pub fn install_service(config: &Path, logger: &Logger) -> Result<(), String> {
             logf!(logger, "The service starts with the default settings: could not read {}: {err}", config.display())
         }
     }
+    // The strips' and buses' settings are in the profiles beside it.
+    match crate::config::copy_profiles(config.parent().unwrap_or(Path::new(".")), &folder) {
+        Ok(0) => {}
+        Ok(copied) => logf!(logger, "Copied {copied} profile(s) to the service"),
+        Err(err) => logf!(logger, "The service starts with default mixer settings: could not copy the profiles: {err}"),
+    }
 
     let binary = wide(&format!("\"{}\" --service", program.display()));
     let display = wide(DISPLAY_NAME);

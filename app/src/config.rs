@@ -285,9 +285,9 @@ pub fn parse_bool(value: &str) -> Option<bool> {
 /// visible in the file. There are no cables until the user adds one.
 pub fn default_config_content() -> String {
     [
-        "# Lemon Mix configuration. Cables, strips and buses are set up in the".to_string(),
-        "# application, which rewrites only their tables and keeps the rest of".to_string(),
-        "# this file as it is.".to_string(),
+        "# Lemon Mix configuration. Cables are set up in the application, which".to_string(),
+        "# rewrites only their tables and the active profile and keeps the rest".to_string(),
+        "# of this file as it is. Strips and buses are in the profiles folder.".to_string(),
         String::new(),
         "# Address of the local USB/IP server.".to_string(),
         format!("listen = \"{DEFAULT_LISTEN}\""),
@@ -731,9 +731,31 @@ pub fn save_profile(name: &str, mixer: &SavedMixer) -> io::Result<()> {
     fs::create_dir_all(profiles_dir())?;
     let path = profile_path(name);
     let existing = fs::read(&path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
-    let updated = set_mixer_entries(&existing, mixer)
-        .map_err(|err| io::Error::other(format!("{} is not valid TOML, so it was left as it is: {err}", path.display())))?;
+    let updated = set_mixer_entries(&existing, mixer).map_err(|err| {
+        io::Error::other(format!("{} is not valid TOML, so it was left as it is: {err}", path.display()))
+    })?;
     fs::write(path, updated.trim_start())
+}
+
+/// Copies the profiles in the settings folder `from` to the one `to`, beside
+/// config.toml, replacing those of the same name. Read and written rather
+/// than copied, so the copies take the target folder's permissions. Returns
+/// how many were copied.
+pub fn copy_profiles(from: &std::path::Path, to: &std::path::Path) -> io::Result<usize> {
+    let (source, target) = (from.join("profiles"), to.join("profiles"));
+    let Ok(entries) = fs::read_dir(&source) else {
+        return Ok(0);
+    };
+    fs::create_dir_all(&target)?;
+    let mut copied = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "toml") && path.is_file() {
+            fs::write(target.join(entry.file_name()), fs::read(&path)?)?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 
 /// The active profile's strips and buses, and how many hardware strips and
@@ -892,8 +914,6 @@ pub(crate) mod tests {
                 exclusive: true,
             }],
         };
-        fs::create_dir_all(profiles_dir()).unwrap();
-        fs::write(profile_path("Default"), "# my profile\n").unwrap();
         save_profile("Default", &mixer).unwrap();
         let saved = fs::read_to_string(config_file_path()).unwrap();
         assert!(saved.starts_with(mine), "{saved:?}");

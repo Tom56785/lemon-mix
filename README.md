@@ -71,7 +71,7 @@ Select **Profile: Default** next to **Options** to open the profiles. A profile 
 - **Create and switch** makes a new profile from the current settings or from the defaults, and switches to it.
 - **Delete** removes a profile other than the active one.
 
-Each profile is a file in the `profiles` folder of the settings folder which holds the live settings and the active profile's name as `profile`. From the command line, `LemonMix.exe --control profile Gaming` switches to the profile "Gaming".
+Each profile is a file in the `profiles` folder of the settings folder, holding its `[[strip]]` and `[[bus]]` tables. Changes are saved straight into the active profile's file, and `config.toml` names the active profile as `profile`. From the command line, `LemonMix.exe --control profile Gaming` switches to the profile "Gaming".
 
 ## Stream Deck and the command line
 
@@ -95,13 +95,13 @@ The header shows where the mixer runs.
 - **On demand** (the default): the window runs the mixer. Closing the window keeps it running in the notification area: click the icon to bring the window back, or right-click it for its menu. **Quit** (in that menu or the Options menu) stops it, and the virtual devices leave Windows Sound.
 - **As a Windows service**: the service runs the mixer from Windows start-up, without the window and without an administrator prompt each time. The window only manages it: every change goes to the service through its pipe, and closing the window leaves the audio running.
 
-**Options > Install as Windows service** asks for administrator approval once, copies the program to `%ProgramFiles%\Lemon Mix` and your `config.toml` to `%ProgramData%\Lemon Mix`, and hands the mixer over to the service. **Options > Uninstall Windows service** stops and removes it, copies its settings back, and runs the mixer on demand again.
+**Options > Install as Windows service** asks for administrator approval once, copies the program to `%ProgramFiles%\Lemon Mix` and your `config.toml` and profiles to `%ProgramData%\Lemon Mix`, and hands the mixer over to the service. **Options > Uninstall Windows service** stops and removes it, copies its settings and profiles back, and runs the mixer on demand again.
 
 The service runs as LocalSystem. Physical devices chosen by name are machine-wide and work from the service; check the log line `Devices visible to this process` in the service's log if a device is missing there.
 
 ## Configuration
 
-Settings are in `config.toml` in the settings folder: `%LOCALAPPDATA%\Lemon Mix` on demand, or `%ProgramData%\Lemon Mix` for the service (**Options > Open settings folder**). The application writes the `[[cable]]`, `[[strip]]` and `[[bus]]` tables; everything else, comments included, is left as you wrote it.
+Settings are in `config.toml` in the settings folder: `%LOCALAPPDATA%\Lemon Mix` on demand, or `%ProgramData%\Lemon Mix` for the service (**Options > Open settings folder**). The application writes the `[[cable]]` tables and `profile`; everything else, comments included, is left as you wrote it. The strips' and buses' settings are in the active profile's file, `profiles\<name>.toml` (`profiles\Default.toml` to begin with), which the application writes as they change.
 
 ```toml
 listen = "127.0.0.1:3241"
@@ -109,13 +109,18 @@ latency_ms = 20
 buffer_ms = 20
 diagnostics = false
 stall_test_ms = 0
+profile = "Default"
 
 [[cable]]
 id = 1
 serial = "8F3A2C1D"
 name = "Game"
 kind = "input"
+```
 
+`profiles\Default.toml`:
+
+```toml
 [[strip]]
 id = "H1"
 label = "Mic"
@@ -149,7 +154,8 @@ limiter = -1.0
 | `diagnostics` | Detailed USB/IP traces in the log. | `false` |
 | `stall_test_ms` | For troubleshooting: once a minute, hold every audio transfer and the mixer this long, to reproduce a system stall. 0-10000; 0 is off. | `0` |
 | `[[cable]]` | One table per virtual device, up to 32. `serial` is its identity in Windows; `id` (1-255) sets its USB product ID and bus ID; `kind` is `input`, `output` or `loopback` (the default for tables without one). | none |
-| `[[strip]]`, `[[bus]]` | The mixer's settings by ID: `H1`... hardware strips, `V<cable id>` virtual inputs, `A1`... hardware buses, `B<cable id>` virtual buses. There are as many hardware strips and buses as tables for them, five of each in a new file; with none, the app writes `strip = []` or `bus = []`. `device` is `""` (none), `"default"` or a WASAPI endpoint ID. A hardware strip's `device` may also be `"bus:<key>"`, to take that bus's output. | written by the app |
+| `profile` | The active profile, written by the app when you switch. | `"Default"` |
+| `[[strip]]`, `[[bus]]` (in a profile) | The mixer's settings by ID: `H1`... hardware strips, `V<cable id>` virtual inputs, `A1`... hardware buses, `B<cable id>` virtual buses. There are as many hardware strips and buses as tables for them, five of each in a new profile; with none, the app writes `strip = []` or `bus = []`. `device` is `""` (none), `"default"` or a WASAPI endpoint ID. A hardware strip's `device` may also be `"bus:<key>"`, to take that bus's output. | written by the app |
 
 Invalid values fall back to their defaults and the log says so. If the file is not valid TOML, the application starts with the defaults and does not overwrite the file until it is fixed.
 

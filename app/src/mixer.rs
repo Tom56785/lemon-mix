@@ -1580,11 +1580,20 @@ mod tests {
 
         command(MixerCommand::CreateProfile { name: "Fresh".into(), from_defaults: true }).unwrap();
         assert_eq!((gain(&host), hardware(&host)), (0.0, (5, 5)), "a new configuration's");
-        let file = |name: &str| std::fs::read_to_string(crate::config::profiles_dir().join(format!("{name}.toml"))).unwrap();
+        let file =
+            |name: &str| std::fs::read_to_string(crate::config::profiles_dir().join(format!("{name}.toml"))).unwrap();
         let fresh = file("Fresh");
-        assert!(fresh.starts_with("[[strip]]
-id = \"H1\""), "{fresh}");
-        assert!(fresh.contains("id = \"H5\"") && fresh.contains("id = \"A5\"") && fresh.contains("device = \"default\""), "{fresh}");
+        assert!(
+            fresh.starts_with(
+                "[[strip]]
+id = \"H1\""
+            ),
+            "{fresh}"
+        );
+        assert!(
+            fresh.contains("id = \"H5\"") && fresh.contains("id = \"A5\"") && fresh.contains("device = \"default\""),
+            "{fresh}"
+        );
         assert!(!fresh.contains('#'), "no comments: {fresh}");
         assert!(file("Default").starts_with("[[strip]]"), "the profile switched away from was saved");
         assert!(command(MixerCommand::CreateProfile { name: "fresh".into(), from_defaults: true }).is_err());

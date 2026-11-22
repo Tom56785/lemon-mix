@@ -134,7 +134,7 @@ pub fn uninstall_service(shared: &SharedState) -> Result<(), String> {
     Ok(())
 }
 
-/// Copies the service's settings, cables and mixer over this user's, so the
+/// Copies the service's settings, cables and profiles over this user's, so the
 /// window carries on with what the service had.
 fn take_back_service_config() {
     let logger = control::logger();
@@ -146,6 +146,11 @@ fn take_back_service_config() {
     match copied {
         Ok(()) => logf!(logger, "Copied the service's {} to {}", source.display(), config_file_path().display()),
         Err(err) => logf!(logger, "Keeping this user's settings: could not copy {}: {err}", source.display()),
+    }
+    match crate::config::copy_profiles(&service_data_dir(), &application_data_dir()) {
+        Ok(0) => {}
+        Ok(copied) => logf!(logger, "Copied the service's {copied} profile(s)"),
+        Err(err) => logf!(logger, "Keeping this user's profiles: could not copy the service's: {err}"),
     }
 }
 

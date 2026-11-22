@@ -32,8 +32,8 @@ use clap::Parser;
 
 use crate::cli::Cli;
 use crate::config::{
-    Cable, Config, DEFAULT_BUFFER_MS, DEFAULT_HARDWARE_PORTS, DEFAULT_LATENCY_MS, DEFAULT_LISTEN, MAX_BUFFER_MS, MAX_CABLES, MIN_BUFFER_MS,
-    config_bool, config_cables, config_int, config_string, ensure_config_file,
+    Cable, Config, DEFAULT_BUFFER_MS, DEFAULT_HARDWARE_PORTS, DEFAULT_LATENCY_MS, DEFAULT_LISTEN, MAX_BUFFER_MS,
+    MAX_CABLES, MIN_BUFFER_MS, config_bool, config_cables, config_int, config_string, ensure_config_file,
     load_config_content, numbered_cables, parse_config,
 };
 use crate::mixer::{HostSettings, MANUFACTURER, MixerHost};
@@ -493,7 +493,6 @@ fn new_application_logger(fresh: bool) -> (Logger, Option<LogCloser>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn application_log_starts_fresh() {
