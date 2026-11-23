@@ -293,12 +293,12 @@ mod tests {
     impl Drop for TestKeys {
         fn drop(&mut self) {
             let root = wide(&self.root);
-            let parent = wide(r"Softwareemon mix tests");
-            // safety: removes the test's own key tree, then the tests' parent
-            // key, which regdeletekeyw leaves while another test is using it.
+            let parent = wide(r"Software\Lemon Mix Tests");
+            // SAFETY: removes the test's own key tree, then the tests' parent
+            // key, which RegDeleteKeyW leaves while another test is using it.
             unsafe {
-                regdeletetreew(hkey_current_user, root.as_ptr());
-                regdeletekeyw(hkey_current_user, parent.as_ptr());
+                RegDeleteTreeW(HKEY_CURRENT_USER, root.as_ptr());
+                RegDeleteKeyW(HKEY_CURRENT_USER, parent.as_ptr());
             }
         }
     }
