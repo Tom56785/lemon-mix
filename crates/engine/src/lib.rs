@@ -104,15 +104,29 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod alloc_counter {
-    //! Counts heap allocations made by the current thread.
+    //! Counts heap calls (allocations, reallocations and frees: a free can
+    //! block too) made by the current thread, and by threads being watched,
+    //! such as the engine's clock thread, for another thread to read.
 
     #![allow(clippy::missing_const_for_thread_local)]
 
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     thread_local! {
         static COUNT: Cell<u64> = const { Cell::new(0) };
+        static WATCHED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Heap calls made by watched threads.
+    static WATCHED_CALLS: AtomicU64 = AtomicU64::new(0);
+
+    fn count() {
+        let _ = COUNT.try_with(|c| c.set(c.get() + 1));
+        if WATCHED.try_with(Cell::get).unwrap_or(false) {
+            WATCHED_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     struct Counting;
@@ -120,14 +134,15 @@ pub(crate) mod alloc_counter {
     // SAFETY: every call is forwarded unchanged to the system allocator.
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let _ = COUNT.try_with(|c| c.set(c.get() + 1));
+            count();
             unsafe { System.alloc(layout) }
         }
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            let _ = COUNT.try_with(|c| c.set(c.get() + 1));
+            count();
             unsafe { System.realloc(ptr, layout, new_size) }
         }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            count();
             unsafe { System.dealloc(ptr, layout) }
         }
     }
@@ -135,7 +150,18 @@ pub(crate) mod alloc_counter {
     #[global_allocator]
     static ALLOCATOR: Counting = Counting;
 
-    pub fn allocations() -> u64 {
+    /// Heap calls made by this thread so far.
+    pub fn heap_calls() -> u64 {
         COUNT.with(|c| c.get())
+    }
+
+    /// Starts or stops counting this thread's heap calls in `watched_calls`.
+    pub fn watch_this_thread(on: bool) {
+        WATCHED.with(|w| w.set(on));
+    }
+
+    /// Heap calls made by watched threads so far.
+    pub fn watched_calls() -> u64 {
+        WATCHED_CALLS.load(Ordering::Relaxed)
     }
 }

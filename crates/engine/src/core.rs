@@ -11,7 +11,7 @@
 //! fully built layout, so the audio path neither allocates nor frees.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -174,9 +174,19 @@ pub struct EngineStats {
     pub pulled: AtomicU64,
 }
 
+/// How many commands can wait for the audio thread. Both of its channels are
+/// bounded, so their storage is made with the engine: sending and receiving
+/// never allocate or free, on the audio thread or off it (an unbounded
+/// channel allocates a block every 31 messages, and frees it after).
+const COMMAND_CAPACITY: usize = 1024;
+/// Old layouts on their way back to be freed. `set_topology` takes them
+/// before queueing each layout, so no more can be waiting than there can be
+/// layouts queued, plus one.
+const GARBAGE_CAPACITY: usize = COMMAND_CAPACITY + 2;
+
 pub struct Engine {
     core: Mutex<Core>,
-    commands: Sender<Command>,
+    commands: SyncSender<Command>,
     garbage: Mutex<Receiver<Box<Layout>>>,
     /// The meters of the latest topology.
     meters: Mutex<Arc<MeterBank>>,
@@ -186,7 +196,7 @@ pub struct Engine {
 struct Core {
     layout: Box<Layout>,
     commands: Receiver<Command>,
-    garbage: Sender<Box<Layout>>,
+    garbage: SyncSender<Box<Layout>>,
     /// The next frame to process; `None` until the first.
     next: Option<u64>,
     frame: Frame,
@@ -205,8 +215,8 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Engine {
-        let (commands, receiver) = channel();
-        let (garbage_tx, garbage_rx) = channel();
+        let (commands, receiver) = sync_channel(COMMAND_CAPACITY);
+        let (garbage_tx, garbage_rx) = sync_channel(GARBAGE_CAPACITY);
         let meters = Arc::new(MeterBank::new(0, 0));
         Engine {
             core: Mutex::new(Core {
@@ -310,27 +320,38 @@ impl Engine {
             .collect();
         *lock(&self.meters) = Arc::clone(&meters);
         let layout = Layout { strips: strip_states, buses: bus_states, meters, levels: vec![0.0; strip_count] };
-        let _ = self.commands.send(Command::Layout(Box::new(layout)));
+        self.send(Command::Layout(Box::new(layout)));
     }
 
     pub fn set_strip(&self, index: usize, params: StripParams) {
-        let _ = self.commands.send(Command::Strip(index, params.sanitized()));
+        self.send(Command::Strip(index, params.sanitized()));
     }
 
     /// Connects or disconnects strip `strip` and bus `bus`, by index; the
     /// send fades in or out across the next frame.
     pub fn set_route(&self, strip: usize, bus: usize, on: bool) {
-        let _ = self.commands.send(Command::Route(strip, bus, on));
+        self.send(Command::Route(strip, bus, on));
     }
 
     /// Makes strip `source` duck strip `strip` while it plays (`on`), or not,
     /// by index. A strip does not duck itself.
     pub fn set_duck_source(&self, strip: usize, source: usize, on: bool) {
-        let _ = self.commands.send(Command::DuckSource(strip, source, on));
+        self.send(Command::DuckSource(strip, source, on));
     }
 
     pub fn set_bus(&self, index: usize, params: BusParams) {
-        let _ = self.commands.send(Command::Bus(index, params.sanitized()));
+        self.send(Command::Bus(index, params.sanitized()));
+    }
+
+    /// Queues a command for the audio thread. With the queue full, nothing is
+    /// taking commands (the clock is stopped, say), so the engine's lock is
+    /// free: the waiting commands, then this one, are applied here, in order.
+    fn send(&self, command: Command) {
+        if let Err(TrySendError::Full(command)) = self.commands.try_send(command) {
+            let mut core = lock(&self.core);
+            core.apply_commands();
+            core.apply_command(command);
+        }
     }
 
     /// Processes every frame up to and including `last` that has not been
@@ -384,10 +405,17 @@ impl Engine {
         let thread = std::thread::Builder::new()
             .name("mix engine".into())
             .spawn(move || {
-                // Before the frames start: denoising's first block would
-                // otherwise allocate on this thread.
+                // Before the frames start, what would otherwise allocate on
+                // first use: denoising's first block, and the bus clock's
+                // functions (loaded already when the application checked the
+                // clock at start-up, but not every caller does).
                 crate::denoise::prepare_thread();
+                let _ = current_bus_time();
                 let _audio_thread = cables::enter_audio_thread(&logger);
+                // From here, every frame, command and layout is handled
+                // without touching the heap; the tests watch for it.
+                #[cfg(test)]
+                crate::alloc_counter::watch_this_thread(true);
                 let started = Instant::now();
                 while !flag.load(Ordering::Relaxed) {
                     if let Some(length) = stall_test {
@@ -409,6 +437,8 @@ impl Engine {
                     let soonest = Instant::now() + Duration::from_micros(200);
                     event.wait(Some(next.max(soonest).min(Instant::now() + Duration::from_millis(2))));
                 }
+                #[cfg(test)]
+                crate::alloc_counter::watch_this_thread(false);
             })
             .expect("start the engine clock thread");
         Clock { stop, wake, thread: Some(thread) }
@@ -481,39 +511,46 @@ impl StripState {
 impl Core {
     fn apply_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
-            match command {
-                Command::Layout(mut layout) => {
-                    // Strips that carry on keep their moment, so a rebuild (a
-                    // device plugged in, a strip added) is not heard. A plain
-                    // search: there are few strips, and it allocates nothing.
-                    for strip in layout.strips.iter_mut().filter(|s| s.identity != 0) {
-                        if let Some(old) = self.layout.strips.iter_mut().find(|o| o.identity == strip.identity) {
-                            strip.carry_from(old);
-                        }
-                    }
-                    let old = std::mem::replace(&mut self.layout, layout);
-                    let _ = self.garbage.send(old);
-                }
-                Command::Strip(index, params) => {
-                    if let Some(strip) = self.layout.strips.get_mut(index) {
-                        strip.apply(params);
+            self.apply_command(command);
+        }
+    }
+
+    fn apply_command(&mut self, command: Command) {
+        match command {
+            Command::Layout(mut layout) => {
+                // Strips that carry on keep their moment, so a rebuild (a
+                // device plugged in, a strip added) is not heard. A plain
+                // search: there are few strips, and it allocates nothing.
+                for strip in layout.strips.iter_mut().filter(|s| s.identity != 0) {
+                    if let Some(old) = self.layout.strips.iter_mut().find(|o| o.identity == strip.identity) {
+                        strip.carry_from(old);
                     }
                 }
-                Command::Bus(index, params) => {
-                    if let Some(bus) = self.layout.buses.get_mut(index) {
-                        bus.limiter.set(params.limiter);
-                        bus.params = params;
-                    }
+                let old = std::mem::replace(&mut self.layout, layout);
+                // Back to be freed off this thread. The channel cannot be
+                // full (see `GARBAGE_CAPACITY`); if it were, the layout
+                // would be freed here rather than lost.
+                let _ = self.garbage.try_send(old);
+            }
+            Command::Strip(index, params) => {
+                if let Some(strip) = self.layout.strips.get_mut(index) {
+                    strip.apply(params);
                 }
-                Command::Route(strip, bus, on) => {
-                    if let Some(route) = self.layout.strips.get_mut(strip).and_then(|s| s.routes.get_mut(bus)) {
-                        *route = on;
-                    }
+            }
+            Command::Bus(index, params) => {
+                if let Some(bus) = self.layout.buses.get_mut(index) {
+                    bus.limiter.set(params.limiter);
+                    bus.params = params;
                 }
-                Command::DuckSource(strip, source, on) => {
-                    if let Some(duck) = self.layout.strips.get_mut(strip).and_then(|s| s.duck_sources.get_mut(source)) {
-                        *duck = on && source != strip;
-                    }
+            }
+            Command::Route(strip, bus, on) => {
+                if let Some(route) = self.layout.strips.get_mut(strip).and_then(|s| s.routes.get_mut(bus)) {
+                    *route = on;
+                }
+            }
+            Command::DuckSource(strip, source, on) => {
+                if let Some(duck) = self.layout.strips.get_mut(strip).and_then(|s| s.duck_sources.get_mut(source)) {
+                    *duck = on && source != strip;
                 }
             }
         }

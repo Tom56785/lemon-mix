@@ -319,9 +319,9 @@ fn processing_does_not_allocate() {
     // As the clock thread does when it starts.
     crate::denoise::prepare_thread();
     rig.engine.process_until(7000); // applies the commands and layout
-    let before = crate::alloc_counter::allocations();
+    let before = crate::alloc_counter::heap_calls();
     rig.engine.process_until(7100);
-    assert_eq!(crate::alloc_counter::allocations() - before, 0);
+    assert_eq!(crate::alloc_counter::heap_calls() - before, 0);
 }
 
 #[test]
@@ -575,4 +575,150 @@ fn a_new_layout_keeps_a_strip_ducked() {
     run(1);
     let first = output.0.lock().unwrap().first().map_or(0.0, |f| f[FRAME_LEN - 1]);
     assert!((first - 0.5).abs() < 1e-3, "a fresh strip starts unducked: {first}");
+}
+
+/// One frame of repeatable noise, loud enough that denoising runs its
+/// network rather than passing silence.
+fn noise_frame(seed: u32) -> Frame {
+    let mut state = seed;
+    std::array::from_fn(|_| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((state >> 8) as f32 / (1u32 << 23) as f32 - 1.0) * 0.3
+    })
+}
+
+/// An output that keeps nothing (a test output's own storage would count
+/// against the audio thread).
+struct Discard;
+impl OutputPort for Discard {
+    fn push(&self, _: &Frame) {}
+}
+
+/// Everything the audio thread can be asked to do at once: denoising fed
+/// noise, EQ, gate, compressor, mono, ducking, a strip taking a bus, a
+/// limiter, and strips that carry their state into each new layout.
+fn busy_topology() -> Topology {
+    let processed =
+        StripParams { denoise: 6.0, eq: [3.0, -2.0, 1.0], gate: 2.0, comp: 4.0, mono: true, ..Default::default() };
+    Topology {
+        strips: vec![
+            StripSpec {
+                source: StripSource::Hardware(Some(Arc::new(TestInput(noise_frame(1))))),
+                params: processed,
+                routes: vec![0, 1],
+                duck_sources: vec![1],
+                identity: 1,
+            },
+            StripSpec {
+                source: StripSource::Hardware(Some(Arc::new(TestInput(noise_frame(2))))),
+                params: StripParams { denoise: 10.0, ..Default::default() },
+                routes: vec![1],
+                duck_sources: Vec::new(),
+                identity: 2,
+            },
+            StripSpec {
+                source: StripSource::Bus(0),
+                params: StripParams::default(),
+                routes: vec![1],
+                duck_sources: Vec::new(),
+                identity: 3,
+            },
+        ],
+        buses: vec![
+            BusSpec {
+                sink: BusSink::Hardware(Some(Arc::new(Discard))),
+                params: BusParams { limiter: Some(-3.0), ..Default::default() },
+            },
+            BusSpec {
+                sink: BusSink::Hardware(Some(Arc::new(Discard))),
+                params: BusParams { mono: true, ..Default::default() },
+            },
+        ],
+    }
+}
+
+/// A round of every kind of change, as the mixer sends them.
+fn send_changes(engine: &Engine, round: usize) {
+    let on = round.is_multiple_of(2);
+    let gain_db = -((round % 12) as f32);
+    engine.set_strip(0, StripParams { gain_db, denoise: if on { 6.0 } else { 0.0 }, gate: 2.0, ..Default::default() });
+    engine.set_route(1, 0, on);
+    engine.set_duck_source(1, 0, on);
+    engine.set_bus(0, BusParams { gain_db, limiter: Some(-3.0), ..Default::default() });
+}
+
+/// Applying changes and taking up new layouts touches the heap no more than
+/// the frames do: 100 layouts, each with a round of changes, more than an
+/// unbounded channel's block of 31 messages many times over.
+#[test]
+fn changes_and_new_layouts_do_not_allocate() {
+    let engine = Engine::new();
+    // As the clock thread does when it starts.
+    crate::denoise::prepare_thread();
+    engine.set_topology(busy_topology());
+    engine.process_until(10_000);
+    let mut frame = 10_000;
+    let mut on_audio_thread = 0;
+    for round in 0..100 {
+        // Building the layout and sending changes happen off the audio
+        // thread, and may allocate; only processing is counted.
+        engine.set_topology(busy_topology());
+        send_changes(&engine, round);
+        let before = crate::alloc_counter::heap_calls();
+        frame += 5;
+        engine.process_until(frame);
+        on_audio_thread += crate::alloc_counter::heap_calls() - before;
+    }
+    assert_eq!(on_audio_thread, 0);
+}
+
+/// The real clock thread, set up as it sets itself up, never touches the
+/// heap while it takes up layouts and changes and processes frames.
+#[test]
+fn the_clock_thread_never_touches_the_heap() {
+    let engine = Arc::new(Engine::new());
+    engine.set_topology(busy_topology());
+    let before = crate::alloc_counter::watched_calls();
+    let clock = engine.start_clock(&Logger::discard(), None);
+    for round in 0..100 {
+        engine.set_topology(busy_topology());
+        send_changes(&engine, round);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    std::thread::sleep(Duration::from_millis(20));
+    drop(clock);
+    let frames = engine.stats.frames.load(Ordering::Relaxed);
+    assert!(frames > 100, "the clock ran: {frames} frames");
+    assert_eq!(crate::alloc_counter::watched_calls() - before, 0);
+}
+
+/// With nothing taking commands (the clock stopped), a full queue does not
+/// block the sender: the engine applies the waiting commands itself, in order.
+#[test]
+fn a_full_command_queue_is_applied_by_the_sender() {
+    let engine = Engine::new();
+    let output = Arc::new(TestOutput::default());
+    engine.set_topology(Topology {
+        strips: vec![StripSpec {
+            source: StripSource::Hardware(Some(Arc::new(TestInput([0.5; FRAME_LEN])))),
+            params: StripParams::default(),
+            routes: vec![0],
+            duck_sources: Vec::new(),
+            identity: 0,
+        }],
+        buses: vec![BusSpec {
+            sink: BusSink::Hardware(Some(Arc::clone(&output) as Arc<dyn OutputPort>)),
+            params: BusParams::default(),
+        }],
+    });
+    for round in 0..3 * COMMAND_CAPACITY {
+        engine.set_strip(0, StripParams { gain_db: -((round % 20) as f32), ..Default::default() });
+    }
+    // Then one more, which must come out last.
+    engine.set_strip(0, StripParams { gain_db: -6.0, ..Default::default() });
+    for frame in (1000..1300).step_by(50) {
+        engine.process_until(frame);
+    }
+    let last = output.0.lock().unwrap().last().map(|f| f[0]).unwrap_or(0.0);
+    assert!((last - 0.5 * db_to_gain(-6.0)).abs() < 1e-3, "the last change applies: {last}");
 }

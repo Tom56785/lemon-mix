@@ -354,7 +354,7 @@ mod tests {
             .collect();
         // From the very first block: what nnnoiseless sets up lazily was set up
         // for this thread.
-        let before = crate::alloc_counter::allocations();
+        let before = crate::alloc_counter::heap_calls();
         for frame in &mut frames[20..] {
             denoiser.process(frame);
         }
@@ -362,7 +362,7 @@ mod tests {
         for frame in &mut frames[20..] {
             denoiser.process(frame);
         }
-        assert_eq!(crate::alloc_counter::allocations() - before, 0);
+        assert_eq!(crate::alloc_counter::heap_calls() - before, 0);
     }
 
     /// How long a frame takes, the ones that run the network included. Run
