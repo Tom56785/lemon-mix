@@ -270,7 +270,7 @@ pub fn on_show_request(show: fn()) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::System::Registry::RegDeleteTreeW;
+    use windows_sys::Win32::System::Registry::{RegDeleteKeyW, RegDeleteTreeW};
 
     /// Keys of the test's own under the user's hive, removed afterwards.
     struct TestKeys {
@@ -293,8 +293,13 @@ mod tests {
     impl Drop for TestKeys {
         fn drop(&mut self) {
             let root = wide(&self.root);
-            // SAFETY: removes the test's own key tree.
-            unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, root.as_ptr()) };
+            let parent = wide(r"Softwareemon mix tests");
+            // safety: removes the test's own key tree, then the tests' parent
+            // key, which regdeletekeyw leaves while another test is using it.
+            unsafe {
+                regdeletetreew(hkey_current_user, root.as_ptr());
+                regdeletekeyw(hkey_current_user, parent.as_ptr());
+            }
         }
     }
 
