@@ -1,40 +1,37 @@
 // Keys that switch a setting of one strip or bus: mute and solo. The key
 // shows the setting as Lemon Mix has it, however it was changed.
 
-import { type Action, action, type KeyDownEvent } from "@elgato/streamdeck";
+import { action } from "@elgato/streamdeck";
 
-import type { Mixer } from "../mixer.js";
 import { find, type Snapshot, type Want } from "../model.js";
-import { MixerAction, title } from "./base.js";
+import type { PressSettings } from "../press.js";
+import { title } from "./base.js";
+import { OnOffAction, unavailable } from "./onoff.js";
 
-type TargetSettings = { target?: string };
+type TargetSettings = { target?: string } & PressSettings;
 
-abstract class SwitchAction extends MixerAction<TargetSettings> {
+abstract class SwitchAction extends OnOffAction<TargetSettings> {
 	protected abstract readonly name: "mute" | "solo";
 	protected abstract readonly want: Want;
 
-	constructor(mixer: Mixer) {
-		super(mixer);
-	}
-
-	protected async render(action: Action<TargetSettings>, settings: TargetSettings, snapshot: Snapshot | undefined): Promise<void> {
-		if (!action.isKey()) {
-			return;
-		}
+	protected current(settings: TargetSettings, snapshot: Snapshot | undefined): boolean | undefined {
 		const found = find(snapshot, settings.target, this.want);
-		const on = found ? Boolean((found.view.params as unknown as Record<string, unknown>)[this.name]) : false;
-		await action.setState(on ? 1 : 0);
-		await action.setTitle(title(snapshot, found?.view.label, Boolean(settings.target)));
+		return found ? Boolean((found.view.params as unknown as Record<string, unknown>)[this.name]) : undefined;
 	}
 
-	override async onKeyDown(ev: KeyDownEvent<TargetSettings>): Promise<void> {
-		const target = ev.payload.settings.target;
-		await this.change(ev.action, async () => {
-			if (!target) {
-				throw new Error("No strip or bus is chosen.");
-			}
-			await this.mixer.control({ action: this.name, target });
-		});
+	protected describe(settings: TargetSettings, snapshot: Snapshot | undefined): string {
+		return title(snapshot, find(snapshot, settings.target, this.want)?.view.label, Boolean(settings.target));
+	}
+
+	protected unavailable(settings: TargetSettings, snapshot: Snapshot | undefined): string {
+		return unavailable(snapshot, Boolean(settings.target));
+	}
+
+	protected async set(settings: TargetSettings, on: boolean): Promise<unknown> {
+		if (!settings.target) {
+			throw new Error("No strip or bus is chosen.");
+		}
+		return this.mixer.control({ action: this.name, target: settings.target, on });
 	}
 }
 

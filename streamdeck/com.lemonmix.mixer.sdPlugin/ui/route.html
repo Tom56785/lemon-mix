@@ -15,5 +15,26 @@
 			<sdpi-select setting="bus" datasource="getBuses" hot-reload placeholder="Choose one" loading="Waiting for Lemon Mix"></sdpi-select>
 		</sdpi-item>
 		<p class="note">The lists come from Lemon Mix while it runs. A choice follows its strip or bus when others are added, removed or renamed.</p>
+
+		<sdpi-item label="Mode">
+			<sdpi-select setting="mode" default="toggle">
+				<option value="toggle">Toggle</option>
+				<option value="push">Push (hold)</option>
+			</sdpi-select>
+		</sdpi-item>
+		<p class="note">Toggle changes it on each press. Push changes it while the key is held and puts it back on release: a send for as long as you hold the key, say.</p>
+
+		<sdpi-item label="Long press">
+			<sdpi-checkbox setting="toggleAgainWhenHeld" label="Toggle again on release"></sdpi-checkbox>
+		</sdpi-item>
+		<sdpi-item label="Hold time (ms)">
+			<sdpi-textfield setting="holdMs" default="2000" pattern="[0-9]+" required></sdpi-textfield>
+		</sdpi-item>
+		<p class="note">Toggle mode only. A press still toggles straight away; if you hold the key for at least this many milliseconds (1000 = 1 second), releasing it toggles back.</p>
+
+		<sdpi-item label="Feedback">
+			<sdpi-checkbox setting="showOk" label="Show checkmark after press"></sdpi-checkbox>
+		</sdpi-item>
+		<p class="note">A title and icon of your own for each state (off and on), set above like any other action's, replace the plugin's.</p>
 	</body>
 </html>

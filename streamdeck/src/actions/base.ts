@@ -76,15 +76,17 @@ export abstract class MixerAction<T extends Settings> extends SingletonAction<T>
 		}
 	}
 
-	/** Makes a change, with an alert on the key or dial when it is refused. */
-	protected async change(action: Action<T>, make: () => Promise<unknown>): Promise<void> {
+	/** Makes a change, with an alert on the key or dial when it is refused; returns whether it worked. */
+	protected async change(action: Action<T>, make: () => Promise<unknown>): Promise<boolean> {
 		try {
 			await make();
+			return true;
 		} catch (err) {
 			streamDeck.logger.warn(`${this.manifestId}: ${err instanceof Error ? err.message : String(err)}`);
 			if (action.isKey() || action.isDial()) {
 				await action.showAlert();
 			}
+			return false;
 		}
 	}
 }

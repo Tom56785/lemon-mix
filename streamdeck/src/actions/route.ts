@@ -1,40 +1,44 @@
 // A key that sends a strip to a bus, lit while it does.
 
-import { type Action, action, type KeyDownEvent } from "@elgato/streamdeck";
+import { action } from "@elgato/streamdeck";
 
 import { find, type Snapshot } from "../model.js";
-import { MixerAction } from "./base.js";
+import type { PressSettings } from "../press.js";
+import { OnOffAction, unavailable } from "./onoff.js";
 
-type RouteSettings = { strip?: string; bus?: string };
+type RouteSettings = { strip?: string; bus?: string } & PressSettings;
 
 @action({ UUID: "com.lemonmix.mixer.route" })
-export class RouteAction extends MixerAction<RouteSettings> {
-	protected async render(action: Action<RouteSettings>, settings: RouteSettings, snapshot: Snapshot | undefined): Promise<void> {
-		if (!action.isKey()) {
-			return;
+export class RouteAction extends OnOffAction<RouteSettings> {
+	protected current(settings: RouteSettings, snapshot: Snapshot | undefined): boolean | undefined {
+		const strip = find(snapshot, settings.strip, "strip");
+		const bus = find(snapshot, settings.bus, "bus");
+		if (strip?.kind !== "strip" || !bus) {
+			return undefined;
+		}
+		return strip.view.routes.includes(bus.view.id);
+	}
+
+	protected describe(settings: RouteSettings, snapshot: Snapshot | undefined): string {
+		if (!snapshot) {
+			return "Lemon Mix\nnot running";
+		}
+		if (!settings.strip || !settings.bus) {
+			return "Choose in\nsettings";
 		}
 		const strip = find(snapshot, settings.strip, "strip");
 		const bus = find(snapshot, settings.bus, "bus");
-		const on = strip?.kind === "strip" && bus !== undefined && strip.view.routes.includes(bus.view.id);
-		await action.setState(on ? 1 : 0);
-		let text: string;
-		if (!snapshot) {
-			text = "Lemon Mix\nnot running";
-		} else if (!settings.strip || !settings.bus) {
-			text = "Choose in\nsettings";
-		} else {
-			text = `${strip?.view.label ?? "?"}\n→ ${bus?.view.label ?? "?"}`;
-		}
-		await action.setTitle(text);
+		return `${strip?.view.label ?? "?"}\n→ ${bus?.view.label ?? "?"}`;
 	}
 
-	override async onKeyDown(ev: KeyDownEvent<RouteSettings>): Promise<void> {
-		const { strip, bus } = ev.payload.settings;
-		await this.change(ev.action, async () => {
-			if (!strip || !bus) {
-				throw new Error("No strip or bus is chosen.");
-			}
-			await this.mixer.control({ action: "route", strip, bus });
-		});
+	protected unavailable(settings: RouteSettings, snapshot: Snapshot | undefined): string {
+		return unavailable(snapshot, Boolean(settings.strip && settings.bus));
+	}
+
+	protected async set(settings: RouteSettings, on: boolean): Promise<unknown> {
+		if (!settings.strip || !settings.bus) {
+			throw new Error("No strip or bus is chosen.");
+		}
+		return this.mixer.control({ action: "route", strip: settings.strip, bus: settings.bus, on });
 	}
 }
