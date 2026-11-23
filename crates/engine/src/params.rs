@@ -23,6 +23,9 @@ pub struct StripParams {
     pub mono: bool,
     /// Balance, from -1 (left) to 1 (right). The centre leaves both at unity.
     pub pan: f32,
+    /// Noise suppression, 0 (off) to 10 (fully denoised). On, it delays the
+    /// strip by `denoise::DENOISE_DELAY`.
+    pub denoise: f32,
     /// Bass, mid and treble, in dB.
     pub eq: [f32; 3],
     /// Noise gate amount, 0 (off) to 10.
@@ -46,6 +49,7 @@ impl Default for StripParams {
             solo: false,
             mono: false,
             pan: 0.0,
+            denoise: 0.0,
             eq: [0.0; 3],
             gate: 0.0,
             comp: 0.0,
@@ -208,6 +212,7 @@ impl StripParams {
         for band in &mut self.eq {
             *band = clamp(*band, -MAX_EQ_DB, MAX_EQ_DB, 0.0);
         }
+        self.denoise = clamp(self.denoise, 0.0, MAX_DYNAMICS, 0.0);
         self.gate = clamp(self.gate, 0.0, MAX_DYNAMICS, 0.0);
         self.comp = clamp(self.comp, 0.0, MAX_DYNAMICS, 0.0);
         self.duck = self.duck.sanitized();

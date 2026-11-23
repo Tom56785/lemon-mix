@@ -518,6 +518,7 @@ pub fn config_mixer(config: &Config) -> SavedMixer {
                 solo: boolean(table, "solo"),
                 mono: boolean(table, "mono"),
                 pan: float(table, "pan", 0.0),
+                denoise: float(table, "denoise", 0.0),
                 eq,
                 gate: float(table, "gate", 0.0),
                 comp: float(table, "comp", 0.0),
@@ -659,6 +660,9 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
             t.insert("eq", value(eq));
             t.insert("gate", value(rounded(p.gate)));
             t.insert("comp", value(rounded(p.comp)));
+            if p.denoise > 0.0 {
+                t.insert("denoise", value(rounded(p.denoise)));
+            }
             let mut routes = Array::new();
             for bus in &s.routes {
                 routes.push(bus.as_str());
@@ -1103,7 +1107,12 @@ duck_fade_up_ms = 1e9
             (text.clone(), config_mixer(&parse_config(&text).unwrap()).strips.remove(0).params)
         };
         let (text, _) = round_trip(&strip);
-        assert!(!text.contains("gate_") && !text.contains("comp_"), "{text}");
+        assert!(!text.contains("gate_") && !text.contains("comp_") && !text.contains("denoise"), "{text}");
+        strip.params.denoise = 6.5;
+        let (text, params) = round_trip(&strip);
+        assert!(text.contains("denoise = 6.5"), "{text}");
+        assert_eq!(params.denoise, 6.5);
+        strip.params.denoise = 0.0;
         strip.params.gate_options = engine::GateOptions { range_db: 30.0, hold_ms: 200.0, ..Default::default() };
         strip.params.comp_options = engine::CompOptions {
             manual: true,

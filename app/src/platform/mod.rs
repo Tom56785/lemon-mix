@@ -7,6 +7,7 @@ pub mod control;
 pub mod download;
 pub mod remote;
 pub mod service;
+pub mod startup;
 pub mod window;
 
 pub use broker::run_attach_broker;

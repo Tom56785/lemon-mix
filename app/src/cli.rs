@@ -54,6 +54,10 @@ pub struct Cli {
     #[arg(long, num_args = 1.., allow_hyphen_values = true, value_name = "COMMAND")]
     pub control: Option<Vec<String>>,
 
+    /// Start with only the notification area icon, the window hidden (as when started with Windows)
+    #[arg(long)]
+    pub minimized: bool,
+
     /// Print version, then exit
     #[arg(long, short = 'V')]
     pub version: bool,

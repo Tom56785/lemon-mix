@@ -21,6 +21,7 @@ use cables::event::Event;
 use cables::logging::Logger;
 use cables::usbip::busclock::current_bus_time;
 
+use crate::denoise::Denoiser;
 use crate::dsp::{Compressor, Ducker, Eq3, Gate, Limiter, declick};
 use crate::meters::{MeterBank, RmsFollower};
 use crate::params::{BusParams, DuckParams, StripParams};
@@ -119,6 +120,7 @@ struct StripState {
     /// Whether this strip feeds each bus, by bus index. Sized with the
     /// layout, so routing changes never allocate.
     routes: Vec<bool>,
+    denoise: Denoiser,
     eq: Eq3,
     gate: Gate,
     comp: Compressor,
@@ -266,7 +268,8 @@ impl Engine {
         let strip_states: Vec<StripState> = topology
             .strips
             .into_iter()
-            .map(|spec| {
+            .enumerate()
+            .map(|(strip_index, spec)| {
                 let mut routes = vec![false; buses];
                 for bus in spec.routes {
                     if let Some(route) = routes.get_mut(bus) {
@@ -284,6 +287,7 @@ impl Engine {
                     identity: spec.identity,
                     params: StripParams::default(),
                     routes,
+                    denoise: Denoiser::staggered(strip_index),
                     eq: Eq3::default(),
                     gate: Gate::default(),
                     comp: Compressor::default(),
@@ -380,6 +384,9 @@ impl Engine {
         let thread = std::thread::Builder::new()
             .name("mix engine".into())
             .spawn(move || {
+                // Before the frames start: denoising's first block would
+                // otherwise allocate on this thread.
+                crate::denoise::prepare_thread();
                 let _audio_thread = cables::enter_audio_thread(&logger);
                 let started = Instant::now();
                 while !flag.load(Ordering::Relaxed) {
@@ -427,7 +434,8 @@ impl Drop for Clock {
 
 impl StripState {
     /// Takes up the moment of the same strip in the layout before.
-    fn carry_from(&mut self, old: &StripState) {
+    fn carry_from(&mut self, old: &mut StripState) {
+        self.denoise.carry_from(&mut old.denoise);
         self.eq.carry_from(&old.eq);
         self.gate.carry_from(&old.gate);
         self.comp.carry_from(&old.comp);
@@ -444,6 +452,9 @@ impl StripState {
     }
 
     fn apply(&mut self, params: StripParams) {
+        if params.denoise != self.params.denoise {
+            self.denoise.set(params.denoise);
+        }
         if params.eq != self.params.eq {
             self.eq.set(params.eq);
         }
@@ -476,7 +487,7 @@ impl Core {
                     // device plugged in, a strip added) is not heard. A plain
                     // search: there are few strips, and it allocates nothing.
                     for strip in layout.strips.iter_mut().filter(|s| s.identity != 0) {
-                        if let Some(old) = self.layout.strips.iter().find(|o| o.identity == strip.identity) {
+                        if let Some(old) = self.layout.strips.iter_mut().find(|o| o.identity == strip.identity) {
                             strip.carry_from(old);
                         }
                     }
@@ -555,8 +566,12 @@ impl Core {
                 declick(frame, last);
             }
 
-            // Processing: EQ, gate, compressor, mono.
+            // Processing: noise suppression, EQ, gate, compressor, mono. The
+            // gate works best on sound already denoised.
             let mut reduction = 1.0f32;
+            if strip.denoise.active() {
+                strip.denoise.process(frame);
+            }
             if strip.eq.active() {
                 strip.eq.process(frame);
             }

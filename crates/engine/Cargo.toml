@@ -9,3 +9,4 @@ publish.workspace = true
 [dependencies]
 cables.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
+nnnoiseless = { version = "0.5.2", default-features = false }

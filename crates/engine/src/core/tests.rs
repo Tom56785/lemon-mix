@@ -311,10 +311,13 @@ fn feature_units_apply_on_their_own_side() {
 #[test]
 fn processing_does_not_allocate() {
     let rig = rig(4, 4, &[&[0, 1], &[1, 2], &[2, 3], &[0, 3]]);
-    rig.engine.set_strip(0, StripParams { eq: [3.0, -2.0, 1.0], gate: 2.0, comp: 4.0, ..Default::default() });
+    rig.engine
+        .set_strip(0, StripParams { denoise: 6.0, eq: [3.0, -2.0, 1.0], gate: 2.0, comp: 4.0, ..Default::default() });
     rig.engine.set_bus(1, BusParams { limiter: Some(-3.0), mono: true, ..Default::default() });
     // Ducking too: strip 0 lowered while strip 1 plays.
     rig.engine.set_duck_source(0, 1, true);
+    // As the clock thread does when it starts.
+    crate::denoise::prepare_thread();
     rig.engine.process_until(7000); // applies the commands and layout
     let before = crate::alloc_counter::allocations();
     rig.engine.process_until(7100);

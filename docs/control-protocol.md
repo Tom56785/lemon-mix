@@ -116,6 +116,8 @@ A strip is ducked, lowered while other strips play, by the strips named with `du
 { "op": "mixer", "command": { "cmd": "duck", "strip": "V2", "sources": ["H1"] } }
 ```
 
+Noise suppression is `params.denoise`, from 0 (off) to 10 (fully denoised).
+
 Likewise the noise gate's finer settings are in `params.gate_options` (`range_db`, `attack_ms`, `hold_ms`, `release_ms`) and the compressor's in `params.comp_options` (`attack_ms`, `release_ms`, `knee_db`, `makeup_db`, which is `null` for automatic, and `manual` with `threshold_db` and `ratio`).
 
 Profiles are managed with `create_profile` (`name`, and `from_defaults` to start from a new configuration's settings rather than the current ones; it switches to the new profile), `switch_profile` (`name`) and `delete_profile` (`name`, not the active one):
@@ -139,7 +141,7 @@ The fields a controller usually needs (the full set is `Snapshot` in `app/src/pr
   "strips": [
     { "id": "H1", "key": "5f06d376711a", "label": "Mic",
       "params": { "gain_db": -6.0, "mute": false, "solo": false, "mono": false, "pan": 0.0,
-                  "eq": [0.0, 0.0, 0.0], "gate": 0.0, "comp": 0.0 },
+                  "eq": [0.0, 0.0, 0.0], "denoise": 0.0, "gate": 0.0, "comp": 0.0 },
       "routes": ["A1", "B2"],
       "port": { "endpoint": "default", "state": "running", "device_name": "Microphone (USB)" } }
   ],

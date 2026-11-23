@@ -27,6 +27,7 @@ use self::shell::{call_service_within, run_job};
 use crate::mixer::MixerHost;
 use crate::platform::control;
 use crate::platform::service::ServiceState;
+use crate::platform::startup::{self, StartupState};
 use crate::protocol::{
     AppView, BusView, CableView, DeviceView, Meter, MixerCommand, Request, StripParams, StripView, Tone,
 };
@@ -71,6 +72,9 @@ fn tone_color(tone: Tone) -> Color32 {
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// Set by the tray's Quit, read by the window.
 static QUIT: AtomicBool = AtomicBool::new(false);
+/// Set when the window is shown from outside it (the tray, a second start), so
+/// the next frame tells the window system too.
+static SHOWN: AtomicBool = AtomicBool::new(false);
 
 fn show_window() {
     let hwnd = WINDOW.load(Ordering::SeqCst);
@@ -81,6 +85,7 @@ fn show_window() {
             SetForegroundWindow(hwnd as _);
         }
     }
+    SHOWN.store(true, Ordering::SeqCst);
     link::repaint();
 }
 
@@ -92,7 +97,7 @@ fn hide_window() {
     }
 }
 
-pub fn run_gui(host: &Arc<MixerHost>) {
+pub fn run_gui(host: &Arc<MixerHost>, minimized: bool) {
     control::init(host);
     control::on_change(link::repaint);
     let logger = control::logger();
@@ -113,6 +118,14 @@ pub fn run_gui(host: &Arc<MixerHost>) {
     }
     // SAFETY: sets this process's taskbar identity with a NUL-terminated string.
     unsafe { SetCurrentProcessExplicitAppUserModelID(wide("LemonMix.LemonMix").as_ptr()) };
+    // A second start asks for the window.
+    startup::on_show_request(show_window);
+    // Starting with Windows follows this copy wherever it now is.
+    match startup::refresh_path() {
+        Ok(true) => logf!(logger, "Start with Windows now opens this copy of Lemon Mix"),
+        Ok(false) => {}
+        Err(err) => logf!(logger, "Could not update the start-with-Windows entry: {err}"),
+    }
 
     let icon = egui::IconData { rgba: crate::icon::lemon_rgba(64), width: 64, height: 64 };
     let options = eframe::NativeOptions {
@@ -123,7 +136,8 @@ pub fn run_gui(host: &Arc<MixerHost>) {
             .with_icon(Arc::new(icon)),
         ..Default::default()
     };
-    let result = eframe::run_native("Lemon Mix", options, Box::new(move |cc| Ok(Box::new(App::new(cc, shared)))));
+    let result =
+        eframe::run_native("Lemon Mix", options, Box::new(move |cc| Ok(Box::new(App::new(cc, shared, minimized)))));
     if let Err(err) = result {
         logf!(logger, "The window could not open: {err}");
         show_fatal_dialog(&format!(
@@ -190,10 +204,12 @@ struct App {
     processing_dialog: Option<(String, Processor)>,
     editing_label: Option<(String, String)>,
     _tray: Option<tray_icon::TrayIcon>,
+    /// Started with Windows (`--minimized`): the first frame hides the window.
+    start_hidden: bool,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, shared: SharedState) -> App {
+    fn new(cc: &eframe::CreationContext<'_>, shared: SharedState, start_hidden: bool) -> App {
         link::set_context(&cc.egui_ctx);
         let mut visuals = egui::Visuals::dark();
         visuals.selection.bg_fill = Color32::from_rgb(150, 120, 20);
@@ -204,6 +220,8 @@ impl App {
             crate::platform::window::set_main_window(hwnd);
         }
         let tray = create_tray().inspect_err(|err| logf!(control::logger(), "No notification area icon: {err}")).ok();
+        // Hidden only with an icon to bring it back from.
+        let start_hidden = start_hidden && tray.is_some();
         let link = Link::start(&shared);
         let mut app = App {
             shared: shared.clone(),
@@ -227,6 +245,7 @@ impl App {
             processing_dialog: None,
             editing_label: None,
             _tray: tray,
+            start_hidden,
         };
         let (mode, state) = {
             let s = lock(&shared);
@@ -243,6 +262,37 @@ impl App {
             }
         }
         app
+    }
+
+    /// The Options menu's "Start with Windows", read from the registry each
+    /// time, so it shows a change made in Task Manager.
+    fn startup_option(&mut self, ui: &mut egui::Ui, mode: Mode) {
+        let state = startup::state();
+        let mut on = state == StartupState::On;
+        let toggle = ui
+            .checkbox(&mut on, "Start with Windows")
+            .on_hover_text("Opens Lemon Mix in the notification area when you sign in.");
+        if toggle.changed()
+            && let Err(err) = startup::set(on)
+        {
+            link::report_error(&self.shared, err);
+        }
+        let note = if state == StartupState::DisabledInTaskManager {
+            Some("Turned off in Task Manager")
+        } else if on && mode == Mode::OnDemand && !self.cables.is_empty() {
+            // The cables are attached as administrator: without the service,
+            // that is a prompt at every sign-in.
+            Some(
+                "Attaching the cables will ask for administrator
+approval at each sign-in; the Windows service
+attaches them without asking.",
+            )
+        } else {
+            None
+        };
+        if let Some(note) = note {
+            ui.label(RichText::new(note).small().color(Color32::GRAY));
+        }
     }
 
     fn send(&self, request: Request) {
@@ -361,6 +411,17 @@ fn create_tray() -> Result<tray_icon::TrayIcon, String> {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.refresh();
+        // Started with Windows: hidden as soon as it first shows (eframe shows
+        // every window after its first frame, before this command applies),
+        // unless something is waiting for an answer.
+        if std::mem::take(&mut self.start_hidden) && self.question.is_none() && lock(&self.shared).errors.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        // Shown from outside: the window system hears it too, or it would
+        // still count the window as hidden.
+        if SHOWN.swap(false, Ordering::SeqCst) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
         let (mode, busy) = {
             let s = lock(&self.shared);
             (s.mode, s.busy.is_some())
@@ -521,6 +582,8 @@ impl App {
                 self.question = Some(Question::UninstallService);
                 ui.close_menu();
             }
+            ui.separator();
+            self.startup_option(ui, mode);
             ui.separator();
             if ui.button("Open settings folder").clicked() {
                 shell::open_settings_folder(&self.shared);
@@ -740,6 +803,8 @@ impl App {
             changed |= widgets::knob_row(ui, &strip.id, "Bass", &mut params.eq[0], -12.0..=12.0, "dB");
             changed |= widgets::knob_row(ui, &strip.id, "Mid", &mut params.eq[1], -12.0..=12.0, "dB");
             changed |= widgets::knob_row(ui, &strip.id, "Treble", &mut params.eq[2], -12.0..=12.0, "dB");
+            // Noise suppression, then the gate that works best after it.
+            changed |= widgets::knob_row(ui, &strip.id, "Denoise", &mut params.denoise, 0.0..=10.0, "");
             // The Gate and Comp labels open their options.
             let gate_changed = params.gate_options != engine::GateOptions::default();
             let (moved, open_gate) = widgets::knob_row_with_options(
@@ -1587,6 +1652,7 @@ mod tests {
                 processing_dialog: None,
                 editing_label: None,
                 _tray: None,
+                start_hidden: false,
             };
             Harness { ctx: egui::Context::default(), app, requests, snapshot, time: 0.0, sent: Vec::new() }
         }

@@ -14,12 +14,12 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 - **Profiles**: named sets of strip and bus settings to switch between from the window or the command line.
 - **Ducking**: a strip can be lowered automatically while chosen other strips play, such as music under a microphone, with fade-down, hold and fade-up times you set.
 - **Remote control**: a [Stream Deck plugin](streamdeck/README.md) whose keys and dials show the mixer's state, a command line (`LemonMix.exe --control mute Mic`), and a [documented pipe protocol](docs/control-protocol.md) for your own tools.
-- **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise gate and compressor (each with finer options: range and timing for the gate; timing, knee, make-up and a manual threshold and ratio for the compressor), peak meters with gain-reduction display.
+- **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise suppression, noise gate and compressor (each with finer options: range and timing for the gate; timing, knee, make-up and a manual threshold and ratio for the compressor), peak meters with gain-reduction display.
 - **Per bus**: fader, mute, mono, peak limiter, meters.
 - **Virtual devices** of three kinds, added, renamed and removed in the app: *input* (a playback device that apps play into), *output* (a recording device that apps record from, such as a microphone for Discord or OBS) and *loopback* (both, the recording side returning the playback side, like a classic virtual cable).
 - **Physical devices** in WASAPI shared mode, or exclusive mode for the lowest latency, with automatic reconnection when a device is unplugged and plugged back, changes format, or (when set to "Default device") when Windows' default changes.
 - Bit-exact paths: a single source at unity gain with no processing passes through untouched.
-- Runs on demand from its window (and the notification area), or as a Windows service from start-up.
+- Runs on demand from its window (and the notification area), or as a Windows service from start-up, and can open with Windows in the notification area.
 - Settings are saved as you change them, in a `config.toml` that keeps your own comments.
 
 The layout follows the classic five-in, five-out virtual mixer: five hardware inputs and five hardware buses to start with, plus as many virtual inputs and outputs as you create. Add more hardware strips and buses with the **+ Input** and **+ Output** columns, and remove one with the **−** button beside its type; the ones after it move up a number, keeping their devices and settings.
@@ -63,6 +63,14 @@ Double-click a hardware strip's or bus's name to rename it, or a fader or knob t
 To capture an application, open a hardware strip's device menu and pick it under **Applications**, which lists the applications with sound (those playing now are marked). The strip records that program's sound, and that of the processes it starts (a browser's audio process, say), while the application still plays on its own device too. To hear an application only through Lemon Mix, set its output to a Lemon Mix virtual input in Windows' *App volume and device preferences* instead. While the application is closed the strip shows *Waiting for* it, and it picks the application up again when it starts. This needs Windows 10 version 2004 or later; DRM-protected playback may record as silence, and the Windows service, which runs outside your sign-in, may not be able to capture your applications.
 
 To feed a bus back into the mixer, open a hardware strip's device menu and choose **From A2** (or any bus) under **Mixer outputs**. The strip hears the bus 1 ms after it leaves the bus, after the bus's fader and limiter. A strip never sends to the bus it takes, and a route that would close a loop through other bus-fed strips is refused.
+
+## Noise suppression
+
+Each strip's **Denoise** knob takes background noise out of a microphone while keeping voices: steady noise such as fans, hum and hiss, and much of the rest, such as keyboards, mouse clicks and the room. It uses RNNoise, a small neural network trained to tell speech from noise (through [nnnoiseless](https://github.com/jneem/nnnoiseless), a Rust port of Xiph's library), and costs about 1% of one processor core per strip.
+
+The knob blends the denoised sound with the original: each step takes out about 4 dB more of the noise, and 10 is fully denoised. Full suppression can make music or singing sound watery, so a lower setting suits those.
+
+While on, the strip is delayed by 19 ms, the time RNNoise needs to gather and process its 10 ms blocks. A strip with the knob at 0 does no work and has no delay. Denoising runs before the EQ, gate and compressor, so the gate judges sound with the noise already gone.
 
 ## Noise gate and compressor
 
@@ -110,6 +118,10 @@ The header shows where the mixer runs.
 
 - **On demand** (the default): the window runs the mixer. Closing the window keeps it running in the notification area: click the icon to bring the window back, or right-click it for its menu. **Quit** (in that menu or the Options menu) stops it, and the virtual devices leave Windows Sound.
 - **As a Windows service**: the service runs the mixer from Windows start-up, without the window and without an administrator prompt each time. The window only manages it: every change goes to the service through its pipe, and closing the window leaves the audio running.
+
+**Options > Start with Windows** opens Lemon Mix in the notification area when you sign in. It adds an entry to the Run list of your user account, which needs no administrator approval, and Task Manager's Startup tab shows it and can turn it off; the Options menu says so if it has been. With the Windows service installed, the audio already runs from start-up, and this only adds the notification area icon. On demand with virtual devices, attaching them asks for administrator approval at each sign-in, which the service avoids.
+
+Only one copy of the window runs at a time: starting Lemon Mix again, from the Start menu or a shortcut, brings up the running window instead.
 
 **Options > Install as Windows service** asks for administrator approval once, copies the program to `%ProgramFiles%\Lemon Mix` and your `config.toml` and profiles to `%ProgramData%\Lemon Mix`, and hands the mixer over to the service. **Options > Uninstall Windows service** stops and removes it, copies its settings and profiles back, and runs the mixer on demand again.
 
@@ -188,6 +200,7 @@ LemonMix.exe [--cables <COUNT>] [--listen <ADDRESS>] [--latency-ms <MS>] [--buff
 | `--self-test` | Validate every device kind's descriptors and control requests, and the bit-exact audio path on its own and through the mixer, then exit |
 | `--dump-descriptors` | Print each virtual device's USB descriptors, then exit |
 | `--measure-latency <PLAYBACK> <RECORDING>` | Play clicks into a playback device and time their arrival on a recording device (matched by name, for example a virtual input routed to a virtual output), then exit |
+| `--minimized` | Start with only the notification area icon, the window hidden, as **Start with Windows** does |
 | `-V`, `--version` | Print the version, then exit |
 | `-h`, `--help` | List all options |
 

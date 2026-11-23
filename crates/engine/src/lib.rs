@@ -19,6 +19,7 @@
 
 pub mod cable;
 pub mod core;
+pub mod denoise;
 pub mod dsp;
 pub mod meters;
 pub mod params;

@@ -51,6 +51,19 @@ fn main() {
         attach_parent_console();
         std::process::exit(ctl::run(args));
     }
+    // One copy has the window: a second start shows that one and leaves, its
+    // log included, alone.
+    #[cfg(windows)]
+    if let Ok(cli) = &parsed
+        && !cli.service
+        && !cli.is_helper_mode()
+        && !platform::startup::claim_window()
+    {
+        if !cli.minimized {
+            platform::startup::show_running_copy();
+        }
+        return;
+    }
     // The service keeps its settings and log in a folder shared by every user,
     // and has no desktop to show a dialog on.
     let service = matches!(&parsed, Ok(cli) if cli.service);
@@ -247,7 +260,7 @@ fn run(logger: &Logger, log_path: &str, parsed: Result<Cli, clap::Error>) -> i32
             return 0;
         }
         // The window starts the mixer, unless the Windows service runs it.
-        gui::run_gui(&host);
+        gui::run_gui(&host, cli.minimized);
         logf!(logger, "Lemon Mix window closed normally");
         platform::control::stop();
         host.shutdown();
