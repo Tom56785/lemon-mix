@@ -19,7 +19,10 @@ use cables::win::wide;
 use eframe::egui::{self, Align, Color32, Layout, RichText, Vec2};
 use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    MB_ICONERROR, MessageBoxW, SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, IsIconic, IsWindowVisible, MB_ICONERROR, MessageBoxW, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, ShowWindow, WINDOWPLACEMENT, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW,
 };
 
 use self::link::{Link, Mode, SharedState, lock, new_shared};
@@ -75,13 +78,33 @@ static QUIT: AtomicBool = AtomicBool::new(false);
 /// Set when the window is shown from outside it (the tray, a second start), so
 /// the next frame tells the window system too.
 static SHOWN: AtomicBool = AtomicBool::new(false);
+/// Whether the window is parked for the notification area (see `hide_window`).
+static PARKED: AtomicBool = AtomicBool::new(false);
+/// Where the window was before it was parked, to put it back.
+static PLACEMENT: std::sync::Mutex<Option<WINDOWPLACEMENT>> = std::sync::Mutex::new(None);
+/// Where a parked window goes: where Windows puts minimised windows.
+const PARK: i32 = -32000;
 
 fn show_window() {
+    // First, so the window's own thread does not park it again while it
+    // comes back (this runs on the tray's or a second start's thread).
+    let parked = PARKED.swap(false, Ordering::SeqCst);
     let hwnd = WINDOW.load(Ordering::SeqCst);
     if hwnd != 0 {
-        // SAFETY: shows and focuses this process's own window.
+        // SAFETY: restores the style and place of, shows and focuses this
+        // process's own window. Hidden while its style changes, so the
+        // taskbar sees it.
         unsafe {
-            ShowWindow(hwnd as _, SW_SHOW);
+            if parked {
+                ShowWindow(hwnd as _, SW_HIDE);
+                let style = GetWindowLongPtrW(hwnd as _, GWL_EXSTYLE);
+                SetWindowLongPtrW(hwnd as _, GWL_EXSTYLE, style & !(WS_EX_TOOLWINDOW as isize));
+                let placement = PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()).take();
+                if let Some(placement) = placement {
+                    SetWindowPlacement(hwnd as _, &placement);
+                }
+            }
+            ShowWindow(hwnd as _, if IsIconic(hwnd as _) != 0 { SW_RESTORE } else { SW_SHOW });
             SetForegroundWindow(hwnd as _);
         }
     }
@@ -89,12 +112,69 @@ fn show_window() {
     link::repaint();
 }
 
+/// Puts the window away to the notification area. It is parked far
+/// off-screen as a tool window (no taskbar button, not in Alt+Tab), not
+/// hidden outright: hiding the active window makes Windows tell it it lost
+/// the focus, eframe asks for a frame to show that, and a hidden window is
+/// never sent WM_PAINT, so eframe polls for that frame nonstop, a whole core.
+/// Parked, the window is still painted (rarely: out of sight, it is not drawn
+/// for the mixer's changes) and eframe goes back to waiting. Minimised tool
+/// windows show as a title bar above the taskbar, so not that either.
 fn hide_window() {
     let hwnd = WINDOW.load(Ordering::SeqCst);
-    if hwnd != 0 {
-        // SAFETY: hides this process's own window.
-        unsafe { ShowWindow(hwnd as _, SW_HIDE) };
+    if hwnd == 0 {
+        return;
     }
+    let already = PARKED.swap(true, Ordering::SeqCst);
+    // SAFETY: records the place of, changes the style of and moves this
+    // process's own window.
+    unsafe {
+        if !already {
+            let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+            placement.length = size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowPlacement(hwnd as _, &mut placement) != 0 {
+                *PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()) = Some(placement);
+            }
+        }
+        // Hidden first: the next window takes the focus, so keys never go to
+        // a window out of sight, and the taskbar sees the style change.
+        ShowWindow(hwnd as _, SW_HIDE);
+        let style = GetWindowLongPtrW(hwnd as _, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd as _, GWL_EXSTYLE, (style | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize));
+        SetWindowPos(
+            hwnd as _,
+            std::ptr::null_mut(),
+            PARK,
+            PARK,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+/// Parks the window again if winit rewrote its styles meanwhile, which would
+/// give it back its taskbar button.
+fn keep_parked() {
+    let hwnd = WINDOW.load(Ordering::SeqCst);
+    if hwnd == 0 || !PARKED.load(Ordering::SeqCst) {
+        return;
+    }
+    // SAFETY: reads this process's own window's style.
+    let style = unsafe { GetWindowLongPtrW(hwnd as _, GWL_EXSTYLE) };
+    if style & WS_EX_TOOLWINDOW as isize == 0 {
+        hide_window();
+    }
+}
+
+/// Whether the window can be seen: not parked, hidden or minimised. Out of
+/// sight, it is not drawn again for the mixer's changes; it catches up when
+/// it is shown.
+pub(crate) fn window_in_sight() -> bool {
+    let hwnd = WINDOW.load(Ordering::SeqCst);
+    // SAFETY: asks about this process's own window.
+    hwnd == 0
+        || (!PARKED.load(Ordering::SeqCst) && unsafe { IsWindowVisible(hwnd as _) != 0 && IsIconic(hwnd as _) == 0 })
 }
 
 pub fn run_gui(host: &Arc<MixerHost>, minimized: bool) {
@@ -443,10 +523,13 @@ impl eframe::App for App {
         let animating = self.refresh();
         // Started with Windows: hidden as soon as it first shows (eframe shows
         // every window after its first frame, before this command applies),
-        // unless something is waiting for an answer.
+        // unless something is waiting for an answer. Hidden from the start, it
+        // has never had the focus, so it is not asked for frames it cannot get
+        // (see `hide_window`).
         if std::mem::take(&mut self.start_hidden) && self.question.is_none() && lock(&self.shared).errors.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
+        keep_parked();
         // Shown from outside: the window system hears it too, or it would
         // still count the window as hidden.
         if SHOWN.swap(false, Ordering::SeqCst) {
@@ -494,7 +577,9 @@ impl eframe::App for App {
         // Drawn again when the mixer's state changes (the link asks), when
         // the user acts (egui asks), and meanwhile only while something moves:
         // a falling meter, or an edit hold that will hand back to the mixer.
-        if animating || busy {
+        if !window_in_sight() {
+            // Put away or minimised: drawn again when it comes back.
+        } else if animating || busy {
             ctx.request_repaint_after(Duration::from_millis(33));
         } else if self.holding {
             ctx.request_repaint_after(EDIT_HOLD);

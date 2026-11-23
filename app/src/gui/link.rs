@@ -87,6 +87,10 @@ pub fn set_context(ctx: &eframe::egui::Context) {
 
 /// Asks the window to redraw; safe from any thread.
 pub fn repaint() {
+    // Out of sight, the window is not drawn: it catches up when it is shown.
+    if !super::window_in_sight() {
+        return;
+    }
     if let Some(ctx) = CONTEXT.get() {
         ctx.request_repaint();
     }
