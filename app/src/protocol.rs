@@ -216,8 +216,6 @@ pub struct PortView {
     pub device_name: String,
     pub error: String,
     pub rate: u32,
-    pub fill_ms: f64,
-    pub correction_ppm: f64,
     pub underruns: u64,
     pub overruns: u64,
 }

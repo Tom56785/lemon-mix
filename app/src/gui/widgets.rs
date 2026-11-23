@@ -480,22 +480,18 @@ pub fn knob_row_with_options(
     (changed, clicked)
 }
 
-/// A hardware port's stream: its rate and drift correction, or why it is
-/// not running.
+/// A hardware port's stream: its rate, or why it is not running.
 pub fn port_status(ui: &mut egui::Ui, port: &PortView) {
     let (color, text, hover) = match port.state.as_str() {
         "running" if port.endpoint.starts_with(devices::APP_ENDPOINT) => (
             OK_COLOR,
             format!("Capturing {}", port.device_name),
-            format!("Buffer {:.1} ms, underruns {}, overruns {}", port.fill_ms, port.underruns, port.overruns),
+            format!("Underruns {}, overruns {}", port.underruns, port.overruns),
         ),
         "running" => (
             OK_COLOR,
-            format!("{:.1} kHz \u{00b7} {:+.0} ppm", port.rate as f64 / 1000.0, port.correction_ppm),
-            format!(
-                "{}\nBuffer {:.1} ms, drift correction {:+.1} ppm\nUnderruns {}, overruns {}",
-                port.device_name, port.fill_ms, port.correction_ppm, port.underruns, port.overruns
-            ),
+            format!("{:.1} kHz", port.rate as f64 / 1000.0),
+            format!("{}\nUnderruns {}, overruns {}", port.device_name, port.underruns, port.overruns),
         ),
         "opening" => (PENDING_COLOR, "Opening\u{2026}".into(), String::new()),
         "failed" if port.endpoint.starts_with(devices::APP_ENDPOINT) => {

@@ -202,6 +202,8 @@ struct App {
     duck_dialog: Option<String>,
     /// The strip (by key) and processor whose options dialog is open.
     processing_dialog: Option<(String, Processor)>,
+    /// Whether an edit hold was on at the last frame, to see it end.
+    holding: bool,
     editing_label: Option<(String, String)>,
     _tray: Option<tray_icon::TrayIcon>,
     /// Started with Windows (`--minimized`): the first frame hides the window.
@@ -243,6 +245,7 @@ impl App {
             profile_dialog: None,
             duck_dialog: None,
             processing_dialog: None,
+            holding: false,
             editing_label: None,
             _tray: tray,
             start_hidden,
@@ -305,15 +308,54 @@ attaches them without asking.",
     }
 
     /// Takes the latest snapshot, keeping the values of controls the user is
-    /// changing.
-    fn refresh(&mut self) {
-        let s = lock(&self.shared);
-        if s.generation == self.generation {
-            return;
+    /// changing, and moves the meters. Returns whether a meter is still
+    /// falling, so the window needs drawing again soon though nothing new
+    /// came from the mixer.
+    fn refresh(&mut self) -> bool {
+        let now = Instant::now();
+        let holding = self.edited.values().any(|t| now - *t < EDIT_HOLD);
+        // When a hold ends, the mixer's values take over again, whether or
+        // not a new snapshot came meanwhile.
+        let hold_ended = self.holding && !holding;
+        self.holding = holding;
+        if lock(&self.shared).generation != self.generation || hold_ended {
+            self.take_snapshot(now);
         }
+        self.move_meters(now)
+    }
+
+    /// Meters rise at once and fall at about 24 dB a second; returns whether
+    /// any is still falling. One fallen below the scale shows nothing.
+    fn move_meters(&mut self, now: Instant) -> bool {
+        /// -80 dB: well below the meters' scale.
+        const SILENT: f32 = 1e-4;
+        let elapsed = (now - self.last_frame).as_secs_f32().min(0.2);
+        let fall = 10f32.powf(-24.0 * elapsed / 20.0);
+        self.last_frame = now;
+        let mut falling = false;
+        for (id, peak) in
+            self.strips.iter().map(|s| (&s.id, s.meter.peak)).chain(self.buses.iter().map(|b| (&b.id, b.meter.peak)))
+        {
+            let shown = self.meter_display.entry(id.clone()).or_insert([0.0; 2]);
+            for channel in 0..2 {
+                let fallen = shown[channel] * fall;
+                shown[channel] = if peak[channel] >= fallen {
+                    peak[channel]
+                } else if fallen < SILENT {
+                    0.0
+                } else {
+                    falling = true;
+                    fallen
+                };
+            }
+        }
+        falling
+    }
+
+    fn take_snapshot(&mut self, now: Instant) {
+        let s = lock(&self.shared);
         self.generation = s.generation;
         let snapshot = &s.snapshot;
-        let now = Instant::now();
         let held = |id: &str, edited: &HashMap<String, Instant>| edited.get(id).is_some_and(|t| now - *t < EDIT_HOLD);
         let mut strips = snapshot.strips.clone();
         for strip in &mut strips {
@@ -349,18 +391,6 @@ attaches them without asking.",
         self.capture_devices = snapshot.capture_devices.clone();
         self.render_devices = snapshot.render_devices.clone();
         self.apps = snapshot.apps.clone();
-        // Meters: a level rises at once and falls at about 24 dB a second.
-        let elapsed = (now - self.last_frame).as_secs_f32().min(0.2);
-        let fall = 10f32.powf(-24.0 * elapsed / 20.0);
-        self.last_frame = now;
-        for (id, peak) in
-            self.strips.iter().map(|s| (&s.id, s.meter.peak)).chain(self.buses.iter().map(|b| (&b.id, b.meter.peak)))
-        {
-            let shown = self.meter_display.entry(id.clone()).or_insert([0.0; 2]);
-            for channel in 0..2 {
-                shown[channel] = peak[channel].max(shown[channel] * fall);
-            }
-        }
     }
 }
 
@@ -410,7 +440,7 @@ fn create_tray() -> Result<tray_icon::TrayIcon, String> {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.refresh();
+        let animating = self.refresh();
         // Started with Windows: hidden as soon as it first shows (eframe shows
         // every window after its first frame, before this command applies),
         // unless something is waiting for an answer.
@@ -461,7 +491,14 @@ impl eframe::App for App {
         let enabled = !modal && !busy;
         self.duck_dialog_ui(ctx, enabled);
         self.processing_dialog_ui(ctx, enabled);
-        ctx.request_repaint_after(Duration::from_millis(33));
+        // Drawn again when the mixer's state changes (the link asks), when
+        // the user acts (egui asks), and meanwhile only while something moves:
+        // a falling meter, or an edit hold that will hand back to the mixer.
+        if animating || busy {
+            ctx.request_repaint_after(Duration::from_millis(33));
+        } else if self.holding {
+            ctx.request_repaint_after(EDIT_HOLD);
+        }
     }
 }
 
@@ -1642,6 +1679,7 @@ mod tests {
                 apps: Vec::new(),
                 edited: HashMap::new(),
                 meter_display: HashMap::new(),
+                holding: false,
                 last_frame: Instant::now(),
                 question: None,
                 new_cable_name: String::new(),
@@ -1763,6 +1801,38 @@ mod tests {
         );
         h.frame(vec![key(egui::Key::Escape, true)]);
         assert!(h.app.profile_dialog.is_none(), "Escape closes it");
+    }
+
+    /// A meter falls away after the sound stops, asking for frames only while
+    /// it falls; with nothing moving, the window asks for none.
+    #[test]
+    fn meters_ask_for_frames_only_while_they_fall() {
+        let mut h = Harness::new();
+        h.snapshot.strips[0].meter.peak = [1.0; 2];
+        h.frame(vec![]);
+        let id = h.snapshot.strips[0].id.clone();
+        assert_eq!(h.app.meter_display[&id], [1.0; 2]);
+        // The sound stops: one new snapshot, then nothing more from the mixer.
+        {
+            let mut s = lock(&h.app.shared);
+            s.snapshot.strips[0].meter.peak = [0.0; 2];
+            s.generation += 1;
+        }
+        let mut frames = 0;
+        loop {
+            // A frame every 33 ms, as the window asks for while a meter falls.
+            h.app.last_frame -= Duration::from_millis(33);
+            frames += 1;
+            if !h.app.refresh() {
+                break;
+            }
+            assert!(frames < 200, "the meter never settles");
+        }
+        // 80 dB at 24 dB a second: about 3.3 s, or 100 frames.
+        assert!((95..=105).contains(&frames), "{frames} frames");
+        assert_eq!(h.app.meter_display[&id], [0.0; 2]);
+        h.app.last_frame -= Duration::from_millis(33);
+        assert!(!h.app.refresh(), "nothing moves: no more frames");
     }
 
     #[test]

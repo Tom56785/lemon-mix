@@ -225,8 +225,8 @@ fn client_connected(pipe: &File) -> bool {
 }
 
 /// A snapshot as a subscription's state and meter events. The state leaves
-/// out what changes all the time (meters, and how full device buffers are),
-/// so it is only sent when something a controller shows changes.
+/// out the meters, which change all the time, so it is only sent when
+/// something a controller shows changes.
 fn subscription_events(mut snapshot: Snapshot) -> (String, String) {
     let keyed = |key: &str, meter: &Meter| KeyedMeter { key: key.to_string(), meter: *meter };
     let meters = Event::Meters {
@@ -235,15 +235,9 @@ fn subscription_events(mut snapshot: Snapshot) -> (String, String) {
     };
     for strip in &mut snapshot.strips {
         strip.meter = Meter::default();
-        if let Some(port) = &mut strip.port {
-            (port.fill_ms, port.correction_ppm) = (0.0, 0.0);
-        }
     }
     for bus in &mut snapshot.buses {
         bus.meter = Meter::default();
-        if let Some(port) = &mut bus.port {
-            (port.fill_ms, port.correction_ppm) = (0.0, 0.0);
-        }
     }
     let state =
         Event::State { protocol: PROTOCOL_VERSION, version: crate::VERSION.to_string(), snapshot: Box::new(snapshot) };
@@ -320,7 +314,7 @@ mod tests {
 
     #[test]
     fn subscription_state_leaves_out_what_always_changes() {
-        let strip = |peak: f32, fill_ms: f64| StripView {
+        let strip = |peak: f32| StripView {
             id: "H1".into(),
             key: "k1".into(),
             label: "Mic".into(),
@@ -328,10 +322,10 @@ mod tests {
             routes: Vec::new(),
             duck_by: Vec::new(),
             meter: Meter { peak: [peak; 2], ..Default::default() },
-            port: Some(crate::protocol::PortView { fill_ms, ..Default::default() }),
+            port: Some(crate::protocol::PortView::default()),
         };
-        let a = subscription_events(Snapshot { strips: vec![strip(0.5, 18.0)], ..Default::default() });
-        let b = subscription_events(Snapshot { strips: vec![strip(0.1, 21.0)], ..Default::default() });
+        let a = subscription_events(Snapshot { strips: vec![strip(0.5)], ..Default::default() });
+        let b = subscription_events(Snapshot { strips: vec![strip(0.1)], ..Default::default() });
         assert_eq!(a.0, b.0, "the state is the same");
         assert_ne!(a.1, b.1, "the meters differ");
         assert!(a.1.contains("\"key\":\"k1\""), "{}", a.1);

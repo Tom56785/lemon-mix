@@ -1288,8 +1288,6 @@ fn port_view(port: &PortHandle, endpoint: String, exclusive: bool) -> PortView {
         device_name: status.device_name,
         error: status.error,
         rate: reading.device_rate,
-        fill_ms: reading.fill_ms,
-        correction_ppm: reading.correction_ppm,
         underruns: reading.underruns,
         overruns: reading.overruns,
     }

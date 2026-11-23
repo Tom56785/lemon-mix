@@ -100,16 +100,24 @@ pub fn send_now(shared: &SharedState, request: &Request) -> Result<Reply, String
         Mode::Service => remote::call(request).map_err(|err| format!("Could not reach the Windows service:\n{err}")),
     };
     let mut s = lock(shared);
-    match &reply {
+    let changed = match &reply {
         Ok(reply) => record(&mut s, reply),
-        Err(_) => s.connected = false,
-    }
+        Err(_) => std::mem::replace(&mut s.connected, false),
+    };
     drop(s);
-    repaint();
+    // The state is polled 30 times a second: the window is drawn again only
+    // when it changed, not for every identical reply.
+    if changed {
+        repaint();
+    }
     reply
 }
 
-fn record(s: &mut Shared, reply: &Reply) {
+/// Takes a reply's state; returns whether it differs from what the window has.
+fn record(s: &mut Shared, reply: &Reply) -> bool {
+    if s.connected && s.version == reply.version && s.snapshot == reply.snapshot {
+        return false;
+    }
     s.snapshot = reply.snapshot.clone();
     s.version = reply.version.clone();
     s.connected = true;
@@ -118,6 +126,7 @@ fn record(s: &mut Shared, reply: &Reply) {
     if s.notice.as_ref().is_some_and(|(_, covers)| *covers != s.snapshot.status) {
         s.notice = None;
     }
+    true
 }
 
 /// The worker thread's end: requests from the window.
@@ -217,6 +226,29 @@ fn coalesce(batch: Vec<Request>) -> Vec<Request> {
 mod tests {
     use super::*;
     use crate::protocol::{MixerCommand, StripParams};
+
+    /// The state is polled 30 times a second: only a reply that differs is
+    /// taken, so the window is not drawn again for identical ones.
+    #[test]
+    fn only_a_reply_that_differs_is_taken() {
+        let shared = new_shared(Mode::OnDemand);
+        let mut s = lock(&shared);
+        let reply = |label: &str| Reply {
+            snapshot: Snapshot { profile: label.into(), ..Default::default() },
+            version: crate::VERSION.into(),
+            protocol: 0,
+            error: None,
+        };
+        assert!(record(&mut s, &reply("a")), "the first");
+        let generation = s.generation;
+        assert!(!record(&mut s, &reply("a")), "the same again");
+        assert_eq!(s.generation, generation);
+        assert!(record(&mut s, &reply("b")), "a change");
+        assert_eq!(s.generation, generation + 1);
+        // Reconnecting counts as new, even with the same state.
+        s.connected = false;
+        assert!(record(&mut s, &reply("b")));
+    }
 
     #[test]
     fn only_the_latest_setting_of_a_control_is_sent() {
