@@ -9,9 +9,10 @@ use super::{ERROR_COLOR, OK_COLOR, PENDING_COLOR, tone_color};
 use crate::protocol::{AppView, DeviceView, PortView, Tone};
 
 pub const STRIP_WIDTH: f32 = 128.0;
-/// The height of a device picker, kept free on strips without one so the
+/// The height of a device picker. Strips without one show their virtual
+/// device's name in its place, and every strip pads what is left, so the
 /// faders line up.
-pub const PICKER_HEIGHT: f32 = 46.0;
+pub const PICKER_HEIGHT: f32 = 42.0;
 const FADER_HEIGHT: f32 = 140.0;
 /// A strip's or bus's background while its device has failed.
 const FAILED_FILL: Color32 = Color32::from_rgb(74, 26, 26);
@@ -159,6 +160,12 @@ pub fn device_picker(
             .on_hover_text("Use the device alone, at its lowest latency. Other apps cannot use it meanwhile.");
     });
     (endpoint != port.endpoint || exclusive != port.exclusive).then_some((endpoint, exclusive))
+}
+
+/// Pads what is left of the device picker's space, begun at `top`.
+pub fn end_picker_space(ui: &mut egui::Ui, top: f32) {
+    let used = ui.cursor().top() - top;
+    ui.add_space((PICKER_HEIGHT - used).max(0.0));
 }
 
 /// A fader with the strip's stereo meter beside it and the gain below.

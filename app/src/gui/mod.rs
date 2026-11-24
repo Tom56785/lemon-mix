@@ -852,6 +852,7 @@ impl App {
             if self.kind_line(ui, kind, hardware, "Remove this input strip") {
                 self.question = Some(Question::RemoveStrip(strip.id.clone(), strip.label.clone()));
             }
+            let picker_top = ui.cursor().top();
             if !hardware {
                 self.virtual_device_line(ui, &strip.id);
             }
@@ -881,9 +882,8 @@ impl App {
                     }
                     self.mixer(&strip.id, MixerCommand::Device { id: strip.id.clone(), endpoint, exclusive });
                 }
-            } else {
-                ui.add_space(widgets::PICKER_HEIGHT);
             }
+            widgets::end_picker_space(ui, picker_top);
 
             let mut params = strip.params.clone();
             let meter = self.meter_display.get(&strip.id).copied().unwrap_or_default();
@@ -992,25 +992,20 @@ impl App {
             if self.kind_line(ui, &kind, hardware, "Remove this output bus") {
                 self.question = Some(Question::RemoveBus(bus.id.clone(), bus.label.clone()));
             }
+            let picker_top = ui.cursor().top();
             if !hardware {
                 self.virtual_device_line(ui, &bus.id);
             }
-            // The solo bus, while it plays the soloed buses rather than its own mix.
-            if bus.id == self.solo_bus && self.buses.iter().any(|b| b.params.solo && b.id != bus.id) {
-                ui.label(RichText::new("Playing soloed buses").small().color(PENDING_COLOR));
-            }
-            if let Some(port) = &bus.port {
-                if let Some((endpoint, exclusive)) =
+            if let Some(port) = &bus.port
+                && let Some((endpoint, exclusive)) =
                     widgets::device_picker(ui, &bus.id, port, &self.render_devices, "Playback devices", &[], &[])
-                {
-                    if let Some(p) = &mut self.buses[index].port {
-                        (p.endpoint, p.exclusive) = (endpoint.clone(), exclusive);
-                    }
-                    self.mixer(&bus.id, MixerCommand::Device { id: bus.id.clone(), endpoint, exclusive });
+            {
+                if let Some(p) = &mut self.buses[index].port {
+                    (p.endpoint, p.exclusive) = (endpoint.clone(), exclusive);
                 }
-            } else {
-                ui.add_space(widgets::PICKER_HEIGHT);
+                self.mixer(&bus.id, MixerCommand::Device { id: bus.id.clone(), endpoint, exclusive });
             }
+            widgets::end_picker_space(ui, picker_top);
             let mut params = bus.params.clone();
             let meter = self.meter_display.get(&bus.id).copied().unwrap_or_default();
             let mut changed = widgets::fader(ui, &bus.id, &mut params.gain_db, meter, bus.meter.reduction);
@@ -1044,6 +1039,11 @@ impl App {
             }
             if let Some(port) = &bus.port {
                 widgets::port_status(ui, port);
+            }
+            // The solo bus, while it plays the soloed buses rather than its own
+            // mix: last, so the controls above stay put.
+            if bus.id == self.solo_bus && self.buses.iter().any(|b| b.params.solo && b.id != bus.id) {
+                ui.label(RichText::new("Playing soloed buses").small().color(PENDING_COLOR));
             }
             if changed {
                 self.buses[index].params = params.clone();
@@ -1764,6 +1764,11 @@ mod tests {
         sent: Vec<Request>,
         /// The text the last frame drew.
         texts: Vec<String>,
+        /// The tops of the meters the last frame drew, strips then buses.
+        meter_tops: Vec<f32>,
+        /// The window's height: tall enough for the buses' lower controls
+        /// when a test needs them.
+        height: f32,
     }
 
     impl Harness {
@@ -1815,6 +1820,8 @@ mod tests {
                 time: 0.0,
                 sent: Vec::new(),
                 texts: Vec::new(),
+                meter_tops: Vec::new(),
+                height: 700.0,
             }
         }
 
@@ -1843,7 +1850,7 @@ mod tests {
             let raw = egui::RawInput {
                 events,
                 time: Some(self.time),
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, 700.0))),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, self.height))),
                 ..Default::default()
             };
             self.time += 0.1;
@@ -1866,6 +1873,17 @@ mod tests {
             for clipped in &output.shapes {
                 texts(&clipped.shape, &mut self.texts);
             }
+            // Meters are the only 22-point-wide boxes in their background grey.
+            self.meter_tops = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(r) if r.fill == Color32::from_gray(18) && r.rect.width() == 22.0 => {
+                        Some(r.rect.top())
+                    }
+                    _ => None,
+                })
+                .collect();
         }
 
         fn focused(&self) -> bool {
@@ -2001,6 +2019,47 @@ mod tests {
         assert_eq!(h.texts.iter().filter(|t| *t == "Desktop Audio").count(), 1, "once, on its strip");
     }
 
+    /// A virtual strip's or bus's device name sits where a hardware one's
+    /// picker is, so the meters line up across both kinds.
+    #[test]
+    fn virtual_and_hardware_meters_line_up() {
+        let mut h = Harness::new();
+        h.height = 1100.0;
+        let mut audio = h.snapshot.strips[0].clone();
+        (audio.id, audio.key, audio.label, audio.port) = ("V4".into(), "k4".into(), "Audio".into(), None);
+        h.snapshot.strips.push(audio);
+        let hardware_bus = BusView {
+            id: "A1".into(),
+            key: "ka1".into(),
+            label: "Speakers".into(),
+            params: Default::default(),
+            meter: Default::default(),
+            port: h.snapshot.strips[0].port.clone(),
+        };
+        let virtual_bus =
+            BusView { id: "B1".into(), key: "kb1".into(), label: "Mic".into(), port: None, ..hardware_bus.clone() };
+        h.snapshot.buses = vec![hardware_bus, virtual_bus];
+        h.snapshot.cables = vec![
+            CableView { id: 1, serial: "S1".into(), name: "Stream Mic".into(), kind: "output".into() },
+            CableView { id: 4, serial: "S4".into(), name: "Desktop Audio".into(), kind: "input".into() },
+        ];
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let tops = &h.meter_tops;
+        assert_eq!(tops.len(), 4, "two strips and two buses: {tops:?}");
+        assert_eq!(tops[0], tops[1], "strip meters line up: {tops:?}");
+        assert_eq!(tops[2], tops[3], "bus meters line up: {tops:?}");
+
+        // The solo bus's note goes below its controls, so it moves nothing.
+        let before = h.meter_tops.clone();
+        h.snapshot.solo_bus = "A1".into();
+        h.snapshot.buses[1].params.solo = true;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(h.texts.iter().any(|t| t == "Playing soloed buses"), "{:?}", h.texts);
+        assert_eq!(h.meter_tops, before, "the solo bus's note moves no meter");
+    }
+
     /// Buses go by their real IDs, as in the config and on the command line:
     /// virtual devices 2 and 3 make buses B2 and B3, not B1 and B2, on the
     /// routing buttons and under the buses' names.
@@ -2048,6 +2107,7 @@ mod tests {
     #[test]
     fn the_solo_bus_says_when_it_plays_soloed_buses() {
         let mut h = Harness::new();
+        h.height = 1100.0;
         let bus = |id: &str, solo: bool| BusView {
             id: id.into(),
             key: format!("k{id}"),
