@@ -731,7 +731,8 @@ impl App {
                 for index in 0..self.strips.len() {
                     let strip = &self.strips[index];
                     let highlight = strip_highlight(&strip.params, &strip.meter);
-                    widgets::strip_frame(ui, highlight, |ui| self.strip_ui(ui, index));
+                    let failed = widgets::device_failed(strip.port.as_ref());
+                    widgets::strip_frame(ui, highlight, failed, |ui| self.strip_ui(ui, index));
                 }
                 if widgets::add_column(ui, "+ Input", "Add a hardware input strip") {
                     self.send(Request::Mixer { command: MixerCommand::AddStrip });
@@ -742,8 +743,10 @@ impl App {
             ui.label(RichText::new("OUTPUTS").small().strong().color(Color32::GRAY));
             ui.horizontal_top(|ui| {
                 for index in 0..self.buses.len() {
-                    let highlight = self.buses[index].params.mute.then_some(ERROR_COLOR);
-                    widgets::strip_frame(ui, highlight, |ui| self.bus_ui(ui, index));
+                    let bus = &self.buses[index];
+                    let highlight = bus.params.mute.then_some(ERROR_COLOR);
+                    let failed = widgets::device_failed(bus.port.as_ref());
+                    widgets::strip_frame(ui, highlight, failed, |ui| self.bus_ui(ui, index));
                 }
                 if widgets::add_column(ui, "+ Output", "Add a hardware output bus") {
                     self.send(Request::Mixer { command: MixerCommand::AddBus });
@@ -836,6 +839,22 @@ impl App {
         .inner
     }
 
+    /// For a virtual strip or bus, the virtual device it is, as Virtual devices
+    /// names it: the strip's or bus's own name may differ. A cable's strip is
+    /// its playback side, and its bus its recording side.
+    fn virtual_device_line(&self, ui: &mut egui::Ui, id: &str) {
+        let cable =
+            id.get(1..).and_then(|n| n.parse::<u32>().ok()).and_then(|n| self.cables.iter().find(|c| c.id == n));
+        let Some(cable) = cable else {
+            return;
+        };
+        let side = if id.starts_with('V') { "playback" } else { "recording" };
+        ui.add(egui::Label::new(RichText::new(&cable.name)).truncate()).on_hover_text(format!(
+            "The virtual {side} device \"{}\" in Windows Sound, as named under Virtual devices",
+            cable.name
+        ));
+    }
+
     fn strip_ui(&mut self, ui: &mut egui::Ui, index: usize) {
         let strip = self.strips[index].clone();
         let hardware = strip.port.is_some();
@@ -845,6 +864,9 @@ impl App {
             let kind = if hardware { "Hardware input" } else { "Virtual input" };
             if self.kind_line(ui, kind, hardware, "Remove this input strip") {
                 self.question = Some(Question::RemoveStrip(strip.id.clone(), strip.label.clone()));
+            }
+            if !hardware {
+                self.virtual_device_line(ui, &strip.id);
             }
             if let Some(port) = &strip.port {
                 let buses: Vec<(String, String)> = self
@@ -980,6 +1002,9 @@ impl App {
             };
             if self.kind_line(ui, &kind, hardware, "Remove this output bus") {
                 self.question = Some(Question::RemoveBus(bus.id.clone(), bus.label.clone()));
+            }
+            if !hardware {
+                self.virtual_device_line(ui, &bus.id);
             }
             if let Some(port) = &bus.port {
                 if let Some((endpoint, exclusive)) =
@@ -1735,6 +1760,8 @@ mod tests {
         time: f64,
         /// Every request the window sent.
         sent: Vec<Request>,
+        /// The text the last frame drew.
+        texts: Vec<String>,
     }
 
     impl Harness {
@@ -1777,7 +1804,15 @@ mod tests {
                 _tray: None,
                 start_hidden: false,
             };
-            Harness { ctx: egui::Context::default(), app, requests, snapshot, time: 0.0, sent: Vec::new() }
+            Harness {
+                ctx: egui::Context::default(),
+                app,
+                requests,
+                snapshot,
+                time: 0.0,
+                sent: Vec::new(),
+                texts: Vec::new(),
+            }
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) {
@@ -1810,13 +1845,24 @@ mod tests {
             };
             self.time += 0.1;
             let app = &mut self.app;
-            let _ = self.ctx.run(raw, |ctx| {
+            let output = self.ctx.run(raw, |ctx| {
                 app.refresh();
                 egui::CentralPanel::default().show(ctx, |ui| app.mixer_panel(ui));
                 app.dialogs(ctx);
                 app.duck_dialog_ui(ctx, true);
                 app.processing_dialog_ui(ctx, true);
             });
+            fn texts(shape: &egui::Shape, into: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, into)),
+                    _ => {}
+                }
+            }
+            self.texts.clear();
+            for clipped in &output.shapes {
+                texts(&clipped.shape, &mut self.texts);
+            }
         }
 
         fn focused(&self) -> bool {
@@ -1918,6 +1964,38 @@ mod tests {
         assert_eq!(h.app.meter_display[&id], [0.0; 2]);
         h.app.last_frame -= Duration::from_millis(33);
         assert!(!h.app.refresh(), "nothing moves: no more frames");
+    }
+
+    /// A virtual strip or bus named differently from its virtual device shows
+    /// the device's name too, as Virtual devices names it; hardware ones show
+    /// their device picker instead.
+    #[test]
+    fn virtual_strips_and_buses_name_their_device() {
+        let mut h = Harness::new();
+        let mut audio = h.snapshot.strips[0].clone();
+        (audio.id, audio.key, audio.label, audio.port) = ("V4".into(), "k4".into(), "Audio".into(), None);
+        h.snapshot.strips.push(audio);
+        h.snapshot.buses.push(BusView {
+            id: "B1".into(),
+            key: "kb1".into(),
+            label: "Mic".into(),
+            params: Default::default(),
+            meter: Default::default(),
+            port: None,
+        });
+        let cable = |id: u32, name: &str, kind: &str| CableView {
+            id,
+            serial: format!("S{id}"),
+            name: name.into(),
+            kind: kind.into(),
+        };
+        h.snapshot.cables = vec![cable(1, "Stream Mic", "output"), cable(4, "Desktop Audio", "input")];
+        h.frame(vec![]);
+        h.frame(vec![]);
+        for name in ["Audio", "Desktop Audio", "Mic", "Stream Mic"] {
+            assert!(h.texts.iter().any(|t| t == name), "{name} is shown: {:?}", h.texts);
+        }
+        assert_eq!(h.texts.iter().filter(|t| *t == "Desktop Audio").count(), 1, "once, on its strip");
     }
 
     #[test]

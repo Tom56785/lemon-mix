@@ -13,6 +13,8 @@ pub const STRIP_WIDTH: f32 = 128.0;
 /// faders line up.
 pub const PICKER_HEIGHT: f32 = 46.0;
 const FADER_HEIGHT: f32 = 140.0;
+/// A strip's or bus's background while its device has failed.
+const FAILED_FILL: Color32 = Color32::from_rgb(74, 26, 26);
 const MIN_DB: f32 = -60.0;
 
 /// One status line: a dot in the tone's colour, the text, and a link after
@@ -32,11 +34,21 @@ pub fn status_line(ui: &mut egui::Ui, tone: Tone, text: &str, link: Option<&str>
 
 /// A strip's or bus's frame, its border in `highlight` when given: the colour
 /// of its mute or solo button while that is on.
-pub fn strip_frame(ui: &mut egui::Ui, highlight: Option<Color32>, content: impl FnOnce(&mut egui::Ui)) {
+/// A strip's or bus's frame: its border lit in `highlight` (mute, solo,
+/// ducking), and while its device has failed, a red border over a red tint,
+/// so the failure is told apart from a mute's red border at a glance.
+pub fn strip_frame(
+    ui: &mut egui::Ui,
+    highlight: Option<Color32>,
+    device_failed: bool,
+    content: impl FnOnce(&mut egui::Ui),
+) {
     // Every frame has a border of the same width, so lighting one up moves nothing.
-    let color = highlight.unwrap_or(ui.visuals().widgets.noninteractive.bg_stroke.color);
+    let idle = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let (color, fill) =
+        if device_failed { (ERROR_COLOR, FAILED_FILL) } else { (highlight.unwrap_or(idle), Color32::from_gray(32)) };
     egui::Frame::group(ui.style())
-        .fill(Color32::from_gray(32))
+        .fill(fill)
         .inner_margin(egui::Margin::same(6))
         .stroke(Stroke::new(2.0_f32, color))
         .show(ui, content);
@@ -480,6 +492,12 @@ pub fn knob_row_with_options(
     (changed, clicked)
 }
 
+/// Whether a hardware port's device has failed: not one waiting for an
+/// application to start, which is no fault, nor one with no device chosen.
+pub fn device_failed(port: Option<&PortView>) -> bool {
+    port.is_some_and(|port| port.state == "failed" && !port.endpoint.starts_with(devices::APP_ENDPOINT))
+}
+
 /// A hardware port's stream: its rate, or why it is not running.
 pub fn port_status(ui: &mut egui::Ui, port: &PortView) {
     let (color, text, hover) = match port.state.as_str() {
@@ -570,7 +588,7 @@ mod editing_tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                     ui.horizontal_top(|ui| {
-                        strip_frame(ui, None, |ui| {
+                        strip_frame(ui, None, false, |ui| {
                             ui.vertical(|ui| {
                                 ui.set_width(STRIP_WIDTH);
                                 changed |= fader(ui, "H1", gain, [0.0; 2], 1.0);
@@ -656,5 +674,62 @@ mod editing_tests {
         assert!(ctx.memory(|m| m.focused().is_none()), "Enter ends the edit");
         assert!(changed, "the change is reported");
         assert_eq!(gain, -6.0);
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    fn port(state: &str, endpoint: &str) -> PortView {
+        PortView { state: state.into(), endpoint: endpoint.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn only_a_device_that_failed_is_an_error() {
+        assert!(device_failed(Some(&port("failed", "{0.0.1.00000000}.{abc}"))));
+        assert!(device_failed(Some(&port("failed", "default"))));
+        assert!(!device_failed(Some(&port("failed", "app:Spotify.exe"))), "waiting for an application");
+        assert!(!device_failed(Some(&port("running", "default"))));
+        assert!(!device_failed(Some(&port("opening", "default"))));
+        assert!(!device_failed(Some(&port("off", ""))), "no device chosen");
+        assert!(!device_failed(Some(&port("bus", "bus:k1"))), "fed from a bus");
+        assert!(!device_failed(None), "a virtual strip");
+    }
+
+    /// The frame's background and border, as painted.
+    fn painted(highlight: Option<Color32>, failed: bool) -> (Color32, Color32) {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))),
+            ..Default::default()
+        };
+        let output = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                strip_frame(ui, highlight, failed, |ui| {
+                    ui.label("Mic");
+                });
+            });
+        });
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.stroke.width == 2.0 => Some((rect.fill, rect.stroke.color)),
+                _ => None,
+            })
+            .expect("the frame is painted")
+    }
+
+    /// A failed device is a red border over a red tint, told apart from a
+    /// mute's red border on the usual background, and shown over it.
+    #[test]
+    fn a_failed_device_is_tinted_red_unlike_a_mute() {
+        assert_eq!(painted(None, true), (FAILED_FILL, ERROR_COLOR));
+        assert_eq!(painted(Some(ERROR_COLOR), false), (Color32::from_gray(32), ERROR_COLOR), "muted");
+        assert_eq!(painted(Some(ERROR_COLOR), true), (FAILED_FILL, ERROR_COLOR), "muted, and failed");
+        assert_eq!(painted(Some(PENDING_COLOR), true), (FAILED_FILL, ERROR_COLOR), "soloed, and failed");
+        let (fill, _) = painted(None, false);
+        assert_eq!(fill, Color32::from_gray(32));
     }
 }
