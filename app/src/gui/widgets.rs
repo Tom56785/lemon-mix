@@ -99,6 +99,9 @@ pub fn device_picker(
                 .map(|d| d.name.clone())
                 .or_else(|| buses.iter().find(|(choice, _)| choice == id).map(|(_, name)| format!("From {name}")))
                 .or_else(|| id.strip_prefix(devices::APP_ENDPOINT).map(devices::app_display_name))
+                // Not connected: the name Windows still has for it, so the user
+                // can tell which device to look into.
+                .or_else(|| (id == port.endpoint && !port.device_name.is_empty()).then(|| port.device_name.clone()))
                 .unwrap_or_else(|| "(not connected)".into()),
         }
     };

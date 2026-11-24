@@ -1363,9 +1363,39 @@ const APPS_INTERVAL: Duration = Duration::from_secs(2);
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// Saves changed settings and logs the engine's and devices' health.
+/// How long the device lists wait after Windows' last device change before
+/// they are read again: plugging in a device brings several at once.
+const DEVICES_SETTLE: Duration = Duration::from_millis(500);
+
+/// Waits for a burst of changes, counted elsewhere, to settle.
+#[derive(Default)]
+struct Settle {
+    seen: u64,
+    since: Option<Instant>,
+}
+
+impl Settle {
+    /// Notes the count of changes so far; returns whether they settled `wait`
+    /// ago, once for each burst.
+    fn settled(&mut self, count: u64, now: Instant, wait: Duration) -> bool {
+        if count != self.seen {
+            (self.seen, self.since) = (count, Some(now));
+            return false;
+        }
+        match self.since {
+            Some(since) if now - since >= wait => {
+                self.since = None;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 fn housekeeping(host: &std::sync::Weak<MixerHost>, stopping: &AtomicBool) {
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
     let mut next_apps = Instant::now();
+    let mut device_changes = Settle::default();
     let mut engine_seen: Option<(u64, u64)> = None;
     let mut devices_seen: HashMap<String, (PortState, u64, u64, u64, Instant)> = HashMap::new();
     while !stopping.load(Ordering::Relaxed) {
@@ -1380,6 +1410,11 @@ fn housekeeping(host: &std::sync::Weak<MixerHost>, stopping: &AtomicBool) {
         if Instant::now() >= next_apps {
             next_apps = Instant::now() + APPS_INTERVAL;
             host.refresh_apps();
+        }
+        // A device came, went or became the default: the pickers' lists follow,
+        // once Windows has finished telling.
+        if device_changes.settled(host.devices.device_changes(), Instant::now(), DEVICES_SETTLE) {
+            host.refresh_devices();
         }
         if Instant::now() < next_health {
             continue;
@@ -1741,6 +1776,28 @@ id = \"H1\""
 
     /// A strip's ducking sources are other strips, kept in strip order, and
     /// follow them as strips are renumbered or removed.
+    /// The device lists are read again once a burst of device changes has
+    /// settled, once for the burst, and not while it goes on.
+    #[test]
+    fn device_changes_settle_before_the_lists_are_read() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let wait = DEVICES_SETTLE;
+        let mut settle = Settle::default();
+        assert!(!settle.settled(0, at(0), wait), "nothing changed");
+        assert!(!settle.settled(0, at(5000), wait));
+        // A device plugged in: three changes over 300 ms.
+        assert!(!settle.settled(1, at(5000), wait));
+        assert!(!settle.settled(2, at(5100), wait));
+        assert!(!settle.settled(3, at(5300), wait));
+        assert!(!settle.settled(3, at(5700), wait), "400 ms after the last: not yet");
+        assert!(settle.settled(3, at(5800), wait), "settled");
+        assert!(!settle.settled(3, at(6000), wait), "once");
+        // Another device later.
+        assert!(!settle.settled(4, at(9000), wait));
+        assert!(settle.settled(4, at(9600), wait));
+    }
+
     #[test]
     fn ducking_sources_follow_the_strips() {
         let host = MixerHost::new(settings(), SavedMixer::default(), &Logger::discard(), "", false);

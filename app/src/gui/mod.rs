@@ -2005,6 +2005,25 @@ mod tests {
         assert!(!h.texts.iter().any(|t| t.starts_with("B1")), "no B1: {:?}", h.texts);
     }
 
+    /// A device that is not connected is named as Windows still names it, so
+    /// the user can tell which one to look into; "(not connected)" only when
+    /// Windows does not know it.
+    #[test]
+    fn a_missing_device_is_named() {
+        let mut h = Harness::new();
+        let port = h.snapshot.strips[0].port.as_mut().unwrap();
+        (port.endpoint, port.state, port.device_name) =
+            ("{0.0.1.00000000}.{gone}".into(), "failed".into(), "Studio Mic".into());
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(h.texts.iter().any(|t| t == "Studio Mic"), "{:?}", h.texts);
+        assert!(!h.texts.iter().any(|t| t == "(not connected)"));
+
+        h.snapshot.strips[0].port.as_mut().unwrap().device_name.clear();
+        h.frame(vec![]);
+        assert!(h.texts.iter().any(|t| t == "(not connected)"), "{:?}", h.texts);
+    }
+
     #[test]
     fn borders_show_mute_then_ducking_then_solo() {
         let quiet = Meter::default();

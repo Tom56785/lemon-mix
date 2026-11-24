@@ -101,6 +101,19 @@ fn device_name(device: &IMMDevice) -> String {
     }
 }
 
+/// The name Windows has for endpoint `id`, whatever its state: one unplugged,
+/// disabled or no longer present is still named, as long as Windows remembers
+/// it.
+pub(crate) fn endpoint_name(id: &str) -> Option<String> {
+    let _com = com();
+    let enumerator = enumerator().ok()?;
+    let id = HSTRING::from(id);
+    // SAFETY: COM calls on the enumerator; the ID string outlives the call.
+    let device = unsafe { enumerator.GetDevice(PCWSTR(id.as_ptr())) }.ok()?;
+    let name = device_name(&device);
+    (name != "Unknown device").then_some(name)
+}
+
 pub(crate) fn enumerate(direction: Direction) -> Result<Vec<DeviceInfo>, String> {
     let _com = com();
     let enumerator = enumerator()?;

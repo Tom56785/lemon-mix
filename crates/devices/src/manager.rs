@@ -50,6 +50,23 @@ pub struct DeviceInfo {
     pub is_default: bool,
 }
 
+/// The name Windows has for endpoint `endpoint`, whatever its state (one
+/// unplugged or disabled is still named), or `None` for the default device,
+/// an application, or one Windows does not know.
+pub fn endpoint_name(endpoint: &str) -> Option<String> {
+    if endpoint.is_empty() || endpoint == DEFAULT_ENDPOINT || endpoint.starts_with(APP_ENDPOINT) {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        crate::wasapi::endpoint_name(endpoint)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// The active endpoints in one direction.
 pub fn list_devices(direction: Direction) -> Result<Vec<DeviceInfo>, String> {
     #[cfg(windows)]
@@ -216,6 +233,8 @@ pub struct DeviceManager {
     logger: Logger,
     buffer_ms: f64,
     ports: Arc<Mutex<Vec<Weak<PortShared>>>>,
+    /// How many device changes Windows has reported (see `device_changes`).
+    changes: Arc<AtomicU64>,
     #[cfg(windows)]
     _notifier: Option<crate::wasapi::Notifier>,
 }
@@ -225,21 +244,34 @@ impl DeviceManager {
     /// the engine: the margin for bursty device buffers and engine batches.
     pub fn new(logger: &Logger, buffer_ms: f64) -> DeviceManager {
         let ports: Arc<Mutex<Vec<Weak<PortShared>>>> = Arc::default();
+        let changes = Arc::new(AtomicU64::new(0));
         #[cfg(windows)]
         let notifier = {
             let watched = Arc::downgrade(&ports);
+            let counted = Arc::clone(&changes);
             let log = logger.clone();
-            crate::wasapi::Notifier::start(Box::new(move |change| on_device_change(&watched, change)))
-                .inspect_err(|err| logf!(log, "Device change notifications are unavailable: {err}"))
-                .ok()
+            crate::wasapi::Notifier::start(Box::new(move |change| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                on_device_change(&watched, change);
+            }))
+            .inspect_err(|err| logf!(log, "Device change notifications are unavailable: {err}"))
+            .ok()
         };
         DeviceManager {
             logger: logger.clone(),
             buffer_ms,
             ports,
+            changes,
             #[cfg(windows)]
             _notifier: notifier,
         }
+    }
+
+    /// How many times Windows has reported a device appearing, going,
+    /// changing state or becoming the default: when it changes, the device
+    /// lists are out of date.
+    pub fn device_changes(&self) -> u64 {
+        self.changes.load(Ordering::Relaxed)
     }
 
     pub fn capture(&self, label: &str) -> PortHandle {
@@ -342,7 +374,9 @@ fn supervise(port: &PortShared) {
                     logf!(port.logger, "DEVICE {} could not stream: {err}", port.label());
                 }
                 status.error = err;
-                status.device_name.clear();
+                // The device it is trying to open, named if Windows can, so
+                // the user can tell which one to look into.
+                status.device_name = endpoint_name(&choice.endpoint).unwrap_or_default();
                 drop(status);
                 let until = Instant::now() + RETRY;
                 while Instant::now() < until && !port.should_stop(generation) {
@@ -394,5 +428,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(port.reading().state, PortState::Off, "turning the port off stops the retries");
+    }
+
+    /// Any endpoint Windows knows is named, the default device, applications
+    /// and unknown IDs are not.
+    #[test]
+    fn endpoints_are_named_as_windows_lists_them() {
+        assert_eq!(endpoint_name(""), None);
+        assert_eq!(endpoint_name(DEFAULT_ENDPOINT), None);
+        assert_eq!(endpoint_name("app:Spotify.exe"), None);
+        assert_eq!(endpoint_name("{0.0.1.00000000}.{00000000-0000-0000-0000-000000000000}"), None);
+        for direction in [Direction::Capture, Direction::Render] {
+            for device in list_devices(direction).unwrap_or_default() {
+                assert_eq!(endpoint_name(&device.id).as_deref(), Some(device.name.as_str()));
+            }
+        }
     }
 }

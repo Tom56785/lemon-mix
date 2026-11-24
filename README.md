@@ -17,7 +17,7 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 - **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise suppression, noise gate and compressor (each with finer options: range and timing for the gate; timing, knee, make-up and a manual threshold and ratio for the compressor), peak meters with gain-reduction display.
 - **Per bus**: fader, mute, mono, peak limiter, meters.
 - **Virtual devices** of three kinds, added, renamed and removed in the app: *input* (a playback device that apps play into), *output* (a recording device that apps record from, such as a microphone for Discord or OBS) and *loopback* (both, the recording side returning the playback side, like a classic virtual cable).
-- **Physical devices** in WASAPI shared mode, or exclusive mode for the lowest latency, with automatic reconnection when a device is unplugged and plugged back, changes format, or (when set to "Default device") when Windows' default changes.
+- **Physical devices** in WASAPI shared mode, or exclusive mode for the lowest latency, with automatic reconnection when a device is unplugged and plugged back, changes format, or (when set to "Default device") when Windows' default changes. The device lists in the window follow devices as they are plugged in and out.
 - Bit-exact paths: a single source at unity gain with no processing passes through untouched.
 - Runs on demand from its window (and the notification area), or as a Windows service from start-up, and can open with Windows in the notification area.
 - Settings are saved as you change them, in a `config.toml` that keeps your own comments.
