@@ -24,6 +24,23 @@ codegen-units = 1
 [profile.test]
 opt-level = 1
 
+# Debug builds run audio in real time too: unoptimized, noise suppression
+# alone took a third of a core and frames overran their millisecond. The
+# dependencies (the noise suppressor and its FFT, the window's drawing) are
+# built optimized, once; the audio crates lightly, so they can still be
+# debugged; the app itself not at all.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.engine]
+opt-level = 1
+
+[profile.dev.package.devices]
+opt-level = 1
+
+[profile.dev.package.cables]
+opt-level = 1
+
 # The self-contained windows-gnu toolchain ships no shlwapi import library,
 # which the crates.io webbrowser crate links; egui only uses it to open links.
 [patch.crates-io]
