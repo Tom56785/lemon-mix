@@ -109,7 +109,9 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          target/release/LemonMix.exe --self-test
+          # Piped, or PowerShell neither waits for this Windows program nor
+          # sets $LASTEXITCODE.
+          target/release/LemonMix.exe --self-test | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "The self-test failed." }
           # Piped, so the output of this Windows program reaches the log.
           $reported = target/release/LemonMix.exe --version | Out-String

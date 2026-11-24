@@ -35,7 +35,11 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Self-test
-        run: target/debug/LemonMix.exe --self-test
+        run: |
+          # Piped, or PowerShell neither waits for this Windows program nor
+          # sets $LASTEXITCODE.
+          target/debug/LemonMix.exe --self-test | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "The self-test failed." }
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
