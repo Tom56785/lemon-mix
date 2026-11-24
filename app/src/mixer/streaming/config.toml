@@ -1,0 +1,54 @@
+# Lemon Mix configuration. Cables, strips and buses are set up in the
+# application, which rewrites only their tables and keeps the rest of
+# this file as it is.
+
+# Address of the local USB/IP server.
+listen = "127.0.0.1:3241"
+# Delay between a cable's playback side and the mixer, 1-1000 ms.
+# Playback that Windows sends later than this plays after a short gap.
+latency_ms = 20
+# Audio kept between each physical device and the mixer, 5-200 ms.
+# Raise it if hardware inputs or outputs crackle.
+buffer_ms = 20
+# Detailed USB/IP traces in the log, for troubleshooting.
+diagnostics = false
+# For troubleshooting: hold all audio transfers this many milliseconds once a
+# minute, to reproduce a system stall. 0 turns it off.
+stall_test_ms = 0
+profile = "Streaming"
+
+[[cable]]
+id = 1
+serial = "7C1E9A42"
+name = "Stream Audio"
+kind = "output"
+
+[[cable]]
+id = 2
+serial = "3F8B2D60"
+name = "Stream Mic"
+kind = "output"
+
+[[cable]]
+id = 3
+serial = "A94C1E87"
+name = "Stream Audio and Mic"
+kind = "output"
+
+[[cable]]
+id = 4
+serial = "5D02B7F3"
+name = "Desktop Audio"
+kind = "input"
+
+[[cable]]
+id = 5
+serial = "E6A3904C"
+name = "Discord"
+kind = "input"
+
+[[cable]]
+id = 6
+serial = "1B7F5C28"
+name = "Playback"
+kind = "input"

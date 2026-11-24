@@ -64,6 +64,19 @@ pub struct MixerHost {
     persist: bool,
     stopping: Arc<AtomicBool>,
     workers: Mutex<Vec<JoinHandle<()>>>,
+    /// Stand-ins for hardware ports, for tests that must not touch real
+    /// devices (see `stand_in`).
+    #[cfg(test)]
+    stand_ins: Mutex<StandIns>,
+}
+
+/// Test inputs and outputs that take the place of hardware strips' and
+/// buses' devices, by ID.
+#[cfg(test)]
+#[derive(Default)]
+struct StandIns {
+    inputs: HashMap<String, Arc<dyn engine::InputPort>>,
+    outputs: HashMap<String, Arc<dyn engine::OutputPort>>,
 }
 
 struct ServerState {
@@ -141,6 +154,8 @@ impl MixerHost {
             persist,
             stopping: Arc::new(AtomicBool::new(false)),
             workers: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            stand_ins: Mutex::default(),
             settings,
         });
         host.rebuild(&[]);
@@ -497,6 +512,47 @@ impl MixerHost {
         self.rebuild_with(cables, &state.audio);
     }
 
+    /// A test's stand-in input for hardware strip `id`, if it has one.
+    #[cfg(test)]
+    fn stand_in_input(&self, id: &str) -> Option<Arc<dyn engine::InputPort>> {
+        lock(&self.stand_ins).inputs.get(id).cloned()
+    }
+
+    #[cfg(not(test))]
+    fn stand_in_input(&self, _id: &str) -> Option<Arc<dyn engine::InputPort>> {
+        None
+    }
+
+    /// A test's stand-in output for hardware bus `id`, if it has one.
+    #[cfg(test)]
+    fn stand_in_output(&self, id: &str) -> Option<Arc<dyn engine::OutputPort>> {
+        lock(&self.stand_ins).outputs.get(id).cloned()
+    }
+
+    #[cfg(not(test))]
+    fn stand_in_output(&self, _id: &str) -> Option<Arc<dyn engine::OutputPort>> {
+        None
+    }
+
+    /// Gives hardware strip or bus `id` a stand-in for its device, as a test
+    /// that must not touch real devices does; it applies from the next
+    /// rebuild.
+    #[cfg(test)]
+    fn stand_in(
+        &self,
+        id: &str,
+        input: Option<Arc<dyn engine::InputPort>>,
+        output: Option<Arc<dyn engine::OutputPort>>,
+    ) {
+        let mut stand_ins = lock(&self.stand_ins);
+        if let Some(input) = input {
+            stand_ins.inputs.insert(id.to_string(), input);
+        }
+        if let Some(output) = output {
+            stand_ins.outputs.insert(id.to_string(), output);
+        }
+    }
+
     /// `rebuild` for a caller that holds the server lock and its cable audio.
     fn rebuild_with(&self, cables: &[Cable], audio: &HashMap<u32, (Cable, Arc<EngineCable>)>) {
         let audio: HashMap<u32, Arc<EngineCable>> =
@@ -553,7 +609,9 @@ impl MixerHost {
                         .find(|b| b.key == key)
                         .and_then(|b| bus_ids.iter().position(|id| *id == b.id))
                         .map_or(StripSource::Hardware(None), StripSource::Bus),
-                    None => StripSource::Hardware(inputs.get(n - 1).and_then(PortHandle::input_port)),
+                    None => StripSource::Hardware(
+                        self.stand_in_input(id).or_else(|| inputs.get(n - 1).and_then(PortHandle::input_port)),
+                    ),
                 }
             } else {
                 let cable = id[1..].parse::<u32>().unwrap_or(0);
@@ -577,7 +635,9 @@ impl MixerHost {
         for id in &bus_ids {
             let saved = mixer.saved.buses.iter().find(|b| &b.id == id).expect("added above");
             let sink = if let Some(n) = id.strip_prefix('A').and_then(|n| n.parse::<usize>().ok()) {
-                BusSink::Hardware(outputs.get(n - 1).and_then(PortHandle::output_port))
+                BusSink::Hardware(
+                    self.stand_in_output(id).or_else(|| outputs.get(n - 1).and_then(PortHandle::output_port)),
+                )
             } else {
                 let cable = id[1..].parse::<u32>().unwrap_or(0);
                 match audio.get(&cable).and_then(|a| a.output.clone()) {
@@ -1378,6 +1438,9 @@ fn housekeeping(host: &std::sync::Weak<MixerHost>, stopping: &AtomicBool) {
         }
     }
 }
+
+#[cfg(test)]
+mod streaming;
 
 #[cfg(test)]
 mod tests {
