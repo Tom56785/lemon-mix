@@ -7,7 +7,7 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 ## Features
 
 - **Input strips**: any number of hardware inputs (physical recording devices), added and removed in the window, and one virtual input per virtual input or loopback device.
-- **Output buses**: any number of hardware buses, A1, A2, ... (physical playback devices), added and removed in the window, and one virtual bus, B1, B2, ..., per virtual output or loopback device.
+- **Output buses**: any number of hardware buses, A1, A2, ... (physical playback devices), added and removed in the window, and one virtual bus per virtual output or loopback device, named B and the device's ID (B2 for virtual device 2).
 - **Routing matrix**: any strip to any combination of buses, with a button per bus on every strip.
 - **Bus returns**: a hardware strip can take a bus's output instead of a device, to process or re-route a mix without a virtual device in between. Lemon Mix refuses routes that would let a bus hear itself.
 - **Application capture**: an input strip can record what one application plays, such as Spotify or a browser, without changing its output device in Windows. The strip follows the application as it closes and starts again.

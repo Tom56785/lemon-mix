@@ -755,24 +755,6 @@ impl App {
         });
     }
 
-    /// The short name of a bus on routing buttons: A1..., and B1... for the
-    /// virtual buses in order.
-    fn bus_short_names(&self) -> Vec<(String, String, String)> {
-        let mut virtual_index = 0;
-        self.buses
-            .iter()
-            .map(|b| {
-                let short = if b.id.starts_with('A') {
-                    b.id.clone()
-                } else {
-                    virtual_index += 1;
-                    format!("B{virtual_index}")
-                };
-                (b.id.clone(), short, b.label.clone())
-            })
-            .collect()
-    }
-
     fn label_ui(&mut self, ui: &mut egui::Ui, id: &str, label: &str, editable: bool) {
         if let Some((editing, text)) = &mut self.editing_label
             && editing == id
@@ -869,12 +851,14 @@ impl App {
                 self.virtual_device_line(ui, &strip.id);
             }
             if let Some(port) = &strip.port {
+                // Buses go by their ID, as on the routing buttons, the config and
+                // the command line, with their name when they have one.
                 let buses: Vec<(String, String)> = self
-                    .bus_short_names()
-                    .into_iter()
-                    .zip(&self.buses)
-                    .map(|((_, short, label), bus)| {
-                        let name = if label == short { short } else { format!("{short} ({label})") };
+                    .buses
+                    .iter()
+                    .map(|bus| {
+                        let name =
+                            if bus.label == bus.id { bus.id.clone() } else { format!("{} ({})", bus.id, bus.label) };
                         (format!("{}{}", crate::mixer::BUS_SOURCE, bus.key), name)
                     })
                     .collect();
@@ -901,14 +885,15 @@ impl App {
             let mut changed = widgets::fader(ui, &strip.id, &mut params.gain_db, meter, strip.meter.reduction);
             changed |= widgets::pan(ui, &strip.id, &mut params.pan);
 
-            // Routing: one button per bus.
-            let names = self.bus_short_names();
+            // Routing: one button per bus, by its ID, as the config and the
+            // command line name it.
+            let names: Vec<(String, String)> = self.buses.iter().map(|b| (b.id.clone(), b.label.clone())).collect();
             let mut route_change = None;
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(3.0, 3.0);
-                for (bus_id, short, label) in &names {
+                for (bus_id, label) in &names {
                     let on = strip.routes.contains(bus_id);
-                    if widgets::toggle(ui, short, on, LEMON).on_hover_text(format!("Send to {label}")).clicked() {
+                    if widgets::toggle(ui, bus_id, on, LEMON).on_hover_text(format!("Send to {label}")).clicked() {
                         route_change = Some((bus_id.clone(), !on));
                     }
                 }
@@ -991,14 +976,13 @@ impl App {
     fn bus_ui(&mut self, ui: &mut egui::Ui, index: usize) {
         let bus = self.buses[index].clone();
         let hardware = bus.port.is_some();
-        let short = self.bus_short_names().get(index).map(|(_, s, _)| s.clone()).unwrap_or_default();
         ui.vertical(|ui| {
             ui.set_width(widgets::STRIP_WIDTH);
             self.label_ui(ui, &bus.id, &bus.label, hardware);
             let kind = if hardware {
-                format!("{short} \u{00b7} hardware output")
+                format!("{} \u{00b7} hardware output", bus.id)
             } else {
-                format!("{short} \u{00b7} virtual output")
+                format!("{} \u{00b7} virtual output", bus.id)
             };
             if self.kind_line(ui, &kind, hardware, "Remove this output bus") {
                 self.question = Some(Question::RemoveBus(bus.id.clone(), bus.label.clone()));
@@ -1996,6 +1980,29 @@ mod tests {
             assert!(h.texts.iter().any(|t| t == name), "{name} is shown: {:?}", h.texts);
         }
         assert_eq!(h.texts.iter().filter(|t| *t == "Desktop Audio").count(), 1, "once, on its strip");
+    }
+
+    /// Buses go by their real IDs, as in the config and on the command line:
+    /// virtual devices 2 and 3 make buses B2 and B3, not B1 and B2, on the
+    /// routing buttons and under the buses' names.
+    #[test]
+    fn buses_show_their_real_ids() {
+        let mut h = Harness::new();
+        let bus = |id: &str, label: &str| BusView {
+            id: id.into(),
+            key: format!("k{id}"),
+            label: label.into(),
+            params: Default::default(),
+            meter: Default::default(),
+            port: None,
+        };
+        h.snapshot.buses = vec![bus("B2", "B2"), bus("B3", "Stream")];
+        h.frame(vec![]);
+        h.frame(vec![]);
+        for text in ["B2", "B3", "B2 \u{00b7} virtual output", "B3 \u{00b7} virtual output"] {
+            assert!(h.texts.iter().any(|t| t == text), "{text} is shown: {:?}", h.texts);
+        }
+        assert!(!h.texts.iter().any(|t| t.starts_with("B1")), "no B1: {:?}", h.texts);
     }
 
     #[test]
