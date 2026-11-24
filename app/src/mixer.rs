@@ -870,7 +870,7 @@ impl MixerHost {
         let (strip_meters, bus_meters) = self.meter_readings();
         let meter = |m: Option<&engine::MeterReading>| {
             let r = m.copied().unwrap_or(engine::MeterReading { reduction: 1.0, ..Default::default() });
-            Meter { peak: r.peak, rms: r.rms, reduction: r.reduction, duck: r.duck }
+            Meter::shown(r.peak, r.rms, r.reduction, r.duck)
         };
         let inputs = lock(&self.inputs);
         let outputs = lock(&self.outputs);

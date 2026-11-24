@@ -243,6 +243,24 @@ impl Default for Meter {
     }
 }
 
+impl Meter {
+    /// A reading as it is shown: levels below -80 dBFS as silence, and gain
+    /// reduction or ducking within 0.1 dB of none as none. A closed gate or
+    /// the denoiser leaves a floor far below the meters' scale (-60 dB) that
+    /// is different every moment; kept, every state would differ from the
+    /// last, and the window would be drawn again 30 times a second to show
+    /// nothing new.
+    pub fn shown(peak: [f32; 2], rms: [f32; 2], reduction: f32, duck: f32) -> Meter {
+        /// -80 dBFS.
+        const SILENT: f32 = 1e-4;
+        /// -0.1 dB.
+        const UNITY: f32 = 0.9886;
+        let level = |x: f32| if x < SILENT { 0.0 } else { x };
+        let gain = |x: f32| if x >= UNITY { 1.0 } else { x };
+        Meter { peak: peak.map(level), rms: rms.map(level), reduction: gain(reduction), duck: gain(duck) }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StripView {
     /// `H1`... for hardware strips, `V<cable id>` for virtual inputs.
@@ -338,6 +356,21 @@ impl Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Readings are shown as the meters can show them: a floor far below
+    /// their scale is silence, and a hair of reduction or ducking is none, so
+    /// a quiet microphone behind a closed gate does not make every state new.
+    #[test]
+    fn meters_leave_out_what_cannot_be_seen() {
+        let floor = Meter::shown([1.8e-7, 9.6e-7], [0.0; 2], 0.001, 1.0);
+        assert_eq!(floor, Meter { peak: [0.0; 2], rms: [0.0; 2], reduction: 0.001, duck: 1.0 });
+        let later = Meter::shown([6.7e-7, 9.7e-7], [3e-6; 2], 0.001, 0.9999);
+        assert_eq!(later, floor, "the same as shown");
+        let voice = Meter::shown([0.3, 0.25], [0.1, 0.08], 0.9, 0.5);
+        assert_eq!(voice, Meter { peak: [0.3, 0.25], rms: [0.1, 0.08], reduction: 0.9, duck: 0.5 });
+        assert_eq!(Meter::shown([1e-4; 2], [0.0; 2], 0.98, 1.0).peak, [1e-4; 2], "-80 dB is kept");
+        assert_eq!(Meter::shown([0.0; 2], [0.0; 2], 0.98, 1.0).reduction, 0.98, "0.2 dB of reduction is kept");
+    }
 
     /// A meter without a ducking reading, as an older Lemon Mix sends, is
     /// not ducked.
