@@ -96,6 +96,7 @@ fn unity_single_route_is_bit_exact() {
         device.handle_control(setup, &[]);
     }
     engine.set_topology(Topology {
+        solo_bus: None,
         strips: vec![StripSpec {
             source: StripSource::Virtual {
                 line: Arc::clone(cable.input.as_ref().unwrap()),
@@ -237,6 +238,7 @@ fn hardware_strips_and_buses() {
     let output = Arc::new(TestOutput::default());
     let tone: Frame = std::array::from_fn(|i| if i % 2 == 0 { 0.5 } else { -0.25 });
     engine.set_topology(Topology {
+        solo_bus: None,
         strips: vec![
             StripSpec {
                 source: StripSource::Hardware(Some(Arc::new(TestInput(tone)))),
@@ -276,6 +278,7 @@ fn catch_up_is_batched_and_bounded() {
     let engine = Arc::new(Engine::new());
     let output = Arc::new(TestOutput::default());
     engine.set_topology(Topology {
+        solo_bus: None,
         strips: Vec::new(),
         buses: vec![BusSpec {
             sink: BusSink::Hardware(Some(Arc::clone(&output) as Arc<dyn OutputPort>)),
@@ -359,6 +362,7 @@ fn a_bus_feeds_a_strip_one_frame_later() {
     let output = Arc::new(TestOutput::default());
     let tone: Frame = std::array::from_fn(|i| if i % 2 == 0 { 0.5 } else { 0.25 });
     engine.set_topology(Topology {
+        solo_bus: None,
         strips: vec![
             StripSpec {
                 source: StripSource::Hardware(Some(Arc::new(TestInput(tone)))),
@@ -412,6 +416,7 @@ fn ducking_rig(mic_routed: bool) -> (Arc<Engine>, Arc<TestOutput>, Arc<Mutex<f32
     let output = Arc::new(TestOutput::default());
     let mic = Arc::new(Mutex::new(0.0f32));
     engine.set_topology(Topology {
+        solo_bus: None,
         strips: vec![
             StripSpec {
                 source: StripSource::Hardware(Some(Arc::new(TestInput([0.5; FRAME_LEN])))),
@@ -530,6 +535,7 @@ fn a_new_layout_keeps_a_strip_ducked() {
     let output = Arc::new(TestOutput::default());
     let mic = Arc::new(Mutex::new(0.3f32));
     let topology = |identities: [u64; 2]| Topology {
+        solo_bus: None,
         strips: vec![
             StripSpec {
                 source: StripSource::Hardware(Some(Arc::new(TestInput([0.5; FRAME_LEN])))),
@@ -601,6 +607,8 @@ fn busy_topology() -> Topology {
     let processed =
         StripParams { denoise: 6.0, eq: [3.0, -2.0, 1.0], gate: 2.0, comp: 4.0, mono: true, ..Default::default() };
     Topology {
+        // Bus 0 plays bus 1, soloed, while it is.
+        solo_bus: Some(0),
         strips: vec![
             StripSpec {
                 source: StripSource::Hardware(Some(Arc::new(TestInput(noise_frame(1))))),
@@ -631,7 +639,7 @@ fn busy_topology() -> Topology {
             },
             BusSpec {
                 sink: BusSink::Hardware(Some(Arc::new(Discard))),
-                params: BusParams { mono: true, ..Default::default() },
+                params: BusParams { mono: true, solo: true, ..Default::default() },
             },
         ],
     }
@@ -645,6 +653,7 @@ fn send_changes(engine: &Engine, round: usize) {
     engine.set_route(1, 0, on);
     engine.set_duck_source(1, 0, on);
     engine.set_bus(0, BusParams { gain_db, limiter: Some(-3.0), ..Default::default() });
+    engine.set_bus(1, BusParams { mono: true, solo: on, ..Default::default() });
 }
 
 /// Applying changes and taking up new layouts touches the heap no more than
@@ -699,6 +708,7 @@ fn a_full_command_queue_is_applied_by_the_sender() {
     let engine = Engine::new();
     let output = Arc::new(TestOutput::default());
     engine.set_topology(Topology {
+        solo_bus: None,
         strips: vec![StripSpec {
             source: StripSource::Hardware(Some(Arc::new(TestInput([0.5; FRAME_LEN])))),
             params: StripParams::default(),
@@ -721,4 +731,111 @@ fn a_full_command_queue_is_applied_by_the_sender() {
     }
     let last = output.0.lock().unwrap().last().map(|f| f[0]).unwrap_or(0.0);
     assert!((last - 0.5 * db_to_gain(-6.0)).abs() < 1e-3, "the last change applies: {last}");
+}
+
+/// Three buses: 0 the solo bus (headphones), 1 and 2 others; strips play
+/// 0.1 into bus 0, 0.5 into bus 1 and 0.25 into bus 2, and one strip takes
+/// bus 0's output into bus 2.
+fn solo_rig(solo_bus: Option<usize>) -> (Arc<Engine>, [Arc<TestOutput>; 3]) {
+    let engine = Arc::new(Engine::new());
+    let outputs = [(); 3].map(|_| Arc::new(TestOutput::default()));
+    let strip = |level: f32, bus: usize| StripSpec {
+        source: StripSource::Hardware(Some(Arc::new(TestInput([level; FRAME_LEN])))),
+        params: StripParams::default(),
+        routes: vec![bus],
+        duck_sources: Vec::new(),
+        identity: 0,
+    };
+    let return_from_0 = StripSpec {
+        source: StripSource::Bus(0),
+        params: StripParams::default(),
+        routes: vec![2],
+        duck_sources: Vec::new(),
+        identity: 0,
+    };
+    engine.set_topology(Topology {
+        strips: vec![strip(0.1, 0), strip(0.5, 1), strip(0.25, 2), return_from_0],
+        buses: outputs
+            .iter()
+            .map(|output| BusSpec {
+                sink: BusSink::Hardware(Some(Arc::clone(output) as Arc<dyn OutputPort>)),
+                params: BusParams::default(),
+            })
+            .collect(),
+        solo_bus,
+    });
+    (engine, outputs)
+}
+
+fn run(engine: &Engine, frame: &mut u64, frames: u64) {
+    for _ in 0..frames.div_ceil(50) {
+        *frame += 50;
+        engine.process_until(*frame);
+    }
+}
+
+/// The largest step between samples since the output was cleared, left.
+fn largest_step(output: &TestOutput) -> f32 {
+    let frames = output.0.lock().unwrap();
+    let samples: Vec<f32> = frames.iter().flat_map(|f| f.as_chunks::<2>().0.iter().map(|pair| pair[0])).collect();
+    samples.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max)
+}
+
+/// While buses are soloed, the solo bus plays them, at its own fader,
+/// instead of its own mix; the soloed buses play on as ever, and what the
+/// solo bus feeds back into the mixer stays its own mix.
+#[test]
+fn soloed_buses_play_on_the_solo_bus_instead_of_its_mix() {
+    let (engine, [phones, one, two]) = solo_rig(Some(0));
+    let mut frame = 30_000;
+    let solo = |bus: usize, on: bool| engine.set_bus(bus, BusParams { solo: on, ..Default::default() });
+    // The first call processes a single frame: run past it.
+    run(&engine, &mut frame, 100);
+    assert!((last_out(&phones) - 0.1).abs() < 1e-6, "its own mix: {}", last_out(&phones));
+    assert!((last_out(&two) - 0.35).abs() < 1e-6, "bus 2 with bus 0 fed back: {}", last_out(&two));
+
+    solo(1, true);
+    run(&engine, &mut frame, 50);
+    assert!((last_out(&phones) - 0.5).abs() < 1e-6, "bus 1 only: {}", last_out(&phones));
+    assert!((last_out(&one) - 0.5).abs() < 1e-6, "bus 1 plays on");
+    assert!((last_out(&two) - 0.35).abs() < 1e-6, "what bus 0 feeds back is still its own mix");
+
+    solo(2, true);
+    run(&engine, &mut frame, 50);
+    assert!((last_out(&phones) - 0.85).abs() < 1e-6, "buses 1 and 2: {}", last_out(&phones));
+
+    // Soloed itself, the solo bus plays its own mix with the others.
+    solo(0, true);
+    run(&engine, &mut frame, 50);
+    assert!((last_out(&phones) - 0.95).abs() < 1e-6, "all three: {}", last_out(&phones));
+
+    // Its fader is the level of what it plays, and its mute silences it.
+    solo(0, false);
+    solo(2, false);
+    engine.set_bus(0, BusParams { gain_db: -6.0, ..Default::default() });
+    run(&engine, &mut frame, 50);
+    assert!((last_out(&phones) - 0.5 * db_to_gain(-6.0)).abs() < 1e-5, "{}", last_out(&phones));
+    engine.set_bus(0, BusParams { mute: true, ..Default::default() });
+    run(&engine, &mut frame, 50);
+    assert_eq!(last_out(&phones), 0.0);
+
+    // Unsoloed, it plays its own mix again, faded rather than cut.
+    engine.set_bus(0, BusParams::default());
+    run(&engine, &mut frame, 50);
+    phones.0.lock().unwrap().clear();
+    solo(1, false);
+    run(&engine, &mut frame, 50);
+    assert!((last_out(&phones) - 0.1).abs() < 1e-6, "{}", last_out(&phones));
+    assert!(largest_step(&phones) < 0.02, "no jump: {}", largest_step(&phones));
+}
+
+/// Without a solo bus, solo on a bus changes nothing.
+#[test]
+fn without_a_solo_bus_bus_solo_does_nothing() {
+    let (engine, [phones, one, _]) = solo_rig(None);
+    let mut frame = 30_000;
+    engine.set_bus(1, BusParams { solo: true, ..Default::default() });
+    run(&engine, &mut frame, 100);
+    assert!((last_out(&phones) - 0.1).abs() < 1e-6);
+    assert!((last_out(&one) - 0.5).abs() < 1e-6);
 }

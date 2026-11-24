@@ -15,7 +15,7 @@ Each virtual device is a USB Audio Class 2.0 device served over a local USB/IP s
 - **Ducking**: a strip can be lowered automatically while chosen other strips play, such as music under a microphone, with fade-down, hold and fade-up times you set.
 - **Remote control**: a [Stream Deck plugin](streamdeck/README.md) whose keys and dials show the mixer's state, a command line (`LemonMix.exe --control mute Mic`), and a [documented pipe protocol](docs/control-protocol.md) for your own tools.
 - **Per strip**: fader (-60 to +12 dB), mute, solo, mono, balance, three-band EQ (bass, mid, treble), noise suppression, noise gate and compressor (each with finer options: range and timing for the gate; timing, knee, make-up and a manual threshold and ratio for the compressor), peak meters with gain-reduction display.
-- **Per bus**: fader, mute, mono, peak limiter, meters.
+- **Per bus**: fader, mute, solo, mono, peak limiter, meters.
 - **Virtual devices** of three kinds, added, renamed and removed in the app: *input* (a playback device that apps play into), *output* (a recording device that apps record from, such as a microphone for Discord or OBS) and *loopback* (both, the recording side returning the playback side, like a classic virtual cable).
 - **Physical devices** in WASAPI shared mode, or exclusive mode for the lowest latency, with automatic reconnection when a device is unplugged and plugged back, changes format, or (when set to "Default device") when Windows' default changes. The device lists in the window follow devices as they are plugged in and out.
 - Bit-exact paths: a single source at unity gain with no processing passes through untouched.
@@ -87,6 +87,12 @@ Select **Duck** on a strip to make it duck: lower it while other strips play. Ti
 
 A strip's border turns purple while it is ducked, and its **Duck** button is lit while it has sources. A source counts as playing by its level as heard, after its fader, mute and solo, so muting the microphone stops the ducking. Ducking settings are saved with the strip, in its profile.
 
+## Bus solo
+
+Select **Solo** on one or more buses to hear them on the solo bus: `solo_bus` in `config.toml`, A1 (your headphones, say) to begin with. While any bus is soloed, the solo bus plays the soloed buses instead of its own mix, at its own fader, and everything else it would play is silent; soloed buses play on their own devices as ever. Soloing the solo bus too adds its own mix back. Soloed buses have a yellow border, and the solo bus says **Playing soloed buses** while it does.
+
+What the solo bus feeds back into the mixer, for a strip taking its output, stays its own mix: soloing never sends a bus back into itself. Solo is saved with each bus, in its profile, and works from the command line too: `LemonMix.exe --control solo B3`.
+
 ## Profiles
 
 Select **Profile: Default** next to **Options** to open the profiles. A profile holds the settings of every strip and bus (levels, routing, processing, names and devices). Virtual devices are shared by every profile, since changing them changes Windows Sound.
@@ -137,6 +143,7 @@ latency_ms = 20
 buffer_ms = 20
 diagnostics = false
 stall_test_ms = 0
+solo_bus = "A1"
 profile = "Default"
 
 [[cable]]
@@ -181,6 +188,7 @@ limiter = -1.0
 | `buffer_ms` | Audio kept between each physical device and the mixer, 5-200 ms. Raise it if hardware inputs or outputs crackle. | `20` |
 | `diagnostics` | Detailed USB/IP traces in the log. | `false` |
 | `stall_test_ms` | For troubleshooting: once a minute, hold every audio transfer and the mixer this long, to reproduce a system stall. 0-10000; 0 is off. | `0` |
+| `solo_bus` | The bus that plays the soloed buses instead of its own mix while any bus is soloed (see [Bus solo](#bus-solo)), by ID, key or name. A name that matches no bus turns bus solo off. | `"A1"` |
 | `[[cable]]` | One table per virtual device, up to 32. `serial` is its identity in Windows; `id` (1-255) sets its USB product ID and bus ID; `kind` is `input`, `output` or `loopback` (the default for tables without one). | none |
 | `profile` | The active profile, written by the app when you switch. | `"Default"` |
 | `[[strip]]`, `[[bus]]` (in a profile) | The mixer's settings by ID: `H1`... hardware strips, `V<cable id>` virtual inputs, `A1`... hardware buses, `B<cable id>` virtual buses. There are as many hardware strips and buses as tables for them, five of each in a new profile; with none, the app writes `strip = []` or `bus = []`. `device` is `""` (none), `"default"` or a WASAPI endpoint ID. A hardware strip's `device` may also be `"bus:<key>"`, to take that bus's output. | written by the app |
@@ -192,7 +200,7 @@ Each kind of virtual device has its own USB product ID range (`FFFF:CBxx` loopba
 ### Command line
 
 ```
-LemonMix.exe [--cables <COUNT>] [--listen <ADDRESS>] [--latency-ms <MS>] [--buffer-ms <MS>] [--diagnostics [<BOOL>]] [--stall-test-ms <MS>]
+LemonMix.exe [--cables <COUNT>] [--listen <ADDRESS>] [--latency-ms <MS>] [--buffer-ms <MS>] [--solo-bus <BUS>] [--diagnostics [<BOOL>]] [--stall-test-ms <MS>]
 ```
 
 | Option | Action |

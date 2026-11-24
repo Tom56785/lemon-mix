@@ -240,6 +240,9 @@ impl StripParams {
 pub struct BusParams {
     pub gain_db: f32,
     pub mute: bool,
+    /// While any bus is soloed, the solo bus (see `Topology::solo_bus`) plays
+    /// the soloed buses instead of its own mix.
+    pub solo: bool,
     pub mono: bool,
     /// The limiter's ceiling in dBFS, when it is on.
     pub limiter: Option<f32>,
@@ -247,7 +250,7 @@ pub struct BusParams {
 
 impl Default for BusParams {
     fn default() -> BusParams {
-        BusParams { gain_db: 0.0, mute: false, mono: false, limiter: None }
+        BusParams { gain_db: 0.0, mute: false, solo: false, mono: false, limiter: None }
     }
 }
 

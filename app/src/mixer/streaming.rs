@@ -24,7 +24,8 @@ use engine::{FRAME_LEN, Frame, InputPort, OutputPort, db_to_gain};
 
 use super::*;
 use crate::config::{
-    config_cables, config_mixer, config_profile, hardware_counts, parse_config, set_cable_entries, set_mixer_entries,
+    config_cables, config_mixer, config_profile, config_string, hardware_counts, parse_config, set_cable_entries,
+    set_mixer_entries,
 };
 
 const CONFIG: &str = include_str!("streaming/config.toml");
@@ -66,7 +67,8 @@ struct Streaming {
 
 impl Streaming {
     fn new() -> Streaming {
-        let cables = config_cables(&parse_config(CONFIG).unwrap());
+        let config = parse_config(CONFIG).unwrap();
+        let cables = config_cables(&config);
         let profile = parse_config(PROFILE).unwrap();
         let (hardware_inputs, hardware_outputs) = hardware_counts(&profile);
         let settings = HostSettings {
@@ -78,6 +80,7 @@ impl Streaming {
             hardware_inputs,
             hardware_outputs,
             profile: "Streaming".into(),
+            solo_bus: config_string(&config, "solo_bus", crate::config::DEFAULT_SOLO_BUS),
         };
         let host = MixerHost::new(settings, config_mixer(&profile), &Logger::discard(), "", false);
         let mic = Arc::new(Mutex::new(0.0));
@@ -174,6 +177,7 @@ fn near(value: f32, expected: f32) -> bool {
 fn the_streaming_setup_reads_as_written() {
     let config = parse_config(CONFIG).unwrap();
     assert_eq!(config_profile(&config), "Streaming");
+    assert_eq!(config_string(&config, "solo_bus", ""), "A1", "the headphones play soloed buses");
     let cables = config_cables(&config);
     let summary: Vec<(u32, &str, CableKind)> = cables.iter().map(|c| (c.id, c.name.as_str(), c.kind)).collect();
     assert_eq!(
@@ -327,6 +331,17 @@ fn the_streaming_setup_mixes_each_source_where_it_belongs() {
     assert!(near(quietest, 0.4), "not ducked: {quietest}");
     s.set_mic(0.0);
     s.play(100, &[desktop]);
+
+    // Soloing Stream Audio and Mic (B3), as `--control solo B3` does, plays
+    // the stream on the headphones (A1, the solo bus) instead of the local
+    // mix: the playback deck, which the local mix leaves out, is heard.
+    s.host.control(&ControlAction::Solo { target: "B3".into(), on: Some(true) }).unwrap();
+    s.play(100, &[desktop, ("Playback", 0.2)]);
+    assert!(near(s.headphones(), 0.6), "the stream: {}", s.headphones());
+    assert!(near(s.level("Stream Audio and Mic"), 0.6), "the stream plays on as ever");
+    s.host.control(&ControlAction::Solo { target: "B3".into(), on: Some(false) }).unwrap();
+    s.play(100, &[desktop]);
+    assert!(near(s.headphones(), 0.4), "the local mix again: {}", s.headphones());
 
     // Unmuting the monitor plays the whole stream (Stream Audio and Mic)
     // locally too.

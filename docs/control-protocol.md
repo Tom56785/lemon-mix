@@ -52,7 +52,7 @@ A *target* names one strip or bus in any of these ways. Names and IDs are matche
 | `action` | Fields | Effect |
 |---|---|---|
 | `mute` | `target`, `on` | Mutes a strip or bus. |
-| `solo` | `target`, `on` | Solos a strip. While any strip is soloed, only soloed strips are heard. |
+| `solo` | `target`, `on` | Solos a strip or a bus. While any strip is soloed, only soloed strips are heard; while any bus is soloed, the solo bus (`solo_bus` in the snapshot) plays the soloed buses instead of its own mix. |
 | `mono` | `target`, `on` | Sums a strip's or bus's left and right channels. |
 | `route` | `strip`, `bus`, `on` | Sends a strip to a bus. Refused if it would make a loop through a bus-fed strip. |
 | `gain` | `target`, `db` | Sets a fader, from -60 (silent) to +12 dB. |
@@ -147,7 +147,7 @@ The fields a controller usually needs (the full set is `Snapshot` in `app/src/pr
   ],
   "buses": [
     { "id": "A1", "key": "80d995df5b55", "label": "A1",
-      "params": { "gain_db": 0.0, "mute": false, "mono": false, "limiter": null },
+      "params": { "gain_db": 0.0, "mute": false, "solo": false, "mono": false, "limiter": null },
       "port": { "endpoint": "default", "state": "running", "device_name": "Speakers" } }
   ],
   "cables": [{ "id": 1, "serial": "8F3A2C1D", "name": "Game", "kind": "loopback" }]
@@ -158,6 +158,7 @@ The fields a controller usually needs (the full set is `Snapshot` in `app/src/pr
 - `port` is present only for hardware strips and buses. `state` is `off`, `opening`, `running` or `failed`, or `bus` for a strip fed from a bus; in that case `device_name` names the bus. A strip capturing an application is `running` while it captures, with the application's name in `device_name`, and `failed` while it waits for the application to start.
 - `apps` lists the applications with sound: `{ "exe": "Spotify.exe", "name": "Spotify", "active": true }`, where `active` means playing now.
 - `profile` is the active profile and `profiles` every profile, in alphabetical order.
+- `solo_bus` is the ID of the bus that plays the soloed buses (from `solo_bus` in config.toml), or empty when that names no bus.
 
 ## From the command line
 

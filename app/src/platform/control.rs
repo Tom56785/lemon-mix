@@ -106,6 +106,7 @@ pub fn snapshot() -> Snapshot {
         profile,
         profiles,
         latency_ms: host.latency_ms(),
+        solo_bus: host.solo_bus(),
     }
 }
 

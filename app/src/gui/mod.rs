@@ -266,6 +266,8 @@ struct App {
     capture_devices: Vec<DeviceView>,
     render_devices: Vec<DeviceView>,
     apps: Vec<AppView>,
+    /// The bus that plays the soloed buses, by ID; empty when there is none.
+    solo_bus: String,
     /// When the user last changed each strip or bus, by ID.
     edited: HashMap<String, Instant>,
     /// Meter levels as shown, with their fall-back.
@@ -315,6 +317,7 @@ impl App {
             capture_devices: Vec::new(),
             render_devices: Vec::new(),
             apps: Vec::new(),
+            solo_bus: String::new(),
             edited: HashMap::new(),
             meter_display: HashMap::new(),
             last_frame: Instant::now(),
@@ -471,6 +474,7 @@ attaches them without asking.",
         self.capture_devices = snapshot.capture_devices.clone();
         self.render_devices = snapshot.render_devices.clone();
         self.apps = snapshot.apps.clone();
+        self.solo_bus = snapshot.solo_bus.clone();
     }
 }
 
@@ -744,7 +748,8 @@ impl App {
             ui.horizontal_top(|ui| {
                 for index in 0..self.buses.len() {
                     let bus = &self.buses[index];
-                    let highlight = bus.params.mute.then_some(ERROR_COLOR);
+                    let highlight =
+                        if bus.params.mute { Some(ERROR_COLOR) } else { bus.params.solo.then_some(PENDING_COLOR) };
                     let failed = widgets::device_failed(bus.port.as_ref());
                     widgets::strip_frame(ui, highlight, failed, |ui| self.bus_ui(ui, index));
                 }
@@ -990,6 +995,10 @@ impl App {
             if !hardware {
                 self.virtual_device_line(ui, &bus.id);
             }
+            // The solo bus, while it plays the soloed buses rather than its own mix.
+            if bus.id == self.solo_bus && self.buses.iter().any(|b| b.params.solo && b.id != bus.id) {
+                ui.label(RichText::new("Playing soloed buses").small().color(PENDING_COLOR));
+            }
             if let Some(port) = &bus.port {
                 if let Some((endpoint, exclusive)) =
                     widgets::device_picker(ui, &bus.id, port, &self.render_devices, "Playback devices", &[], &[])
@@ -1009,6 +1018,15 @@ impl App {
                 ui.spacing_mut().item_spacing = Vec2::new(3.0, 3.0);
                 changed |= widgets::toggle(ui, "Mute", params.mute, ERROR_COLOR).clicked() && {
                     params.mute = !params.mute;
+                    true
+                };
+                let hint = if self.solo_bus.is_empty() {
+                    "Solo: set solo_bus in config.toml to the bus that plays soloed buses".to_string()
+                } else {
+                    format!("Solo: play this bus on {} instead of its own mix", self.solo_bus)
+                };
+                changed |= widgets::toggle(ui, "Solo", params.solo, PENDING_COLOR).on_hover_text(hint).clicked() && {
+                    params.solo = !params.solo;
                     true
                 };
                 changed |= widgets::toggle(ui, "Mono", params.mono, LEMON).clicked() && {
@@ -1773,6 +1791,7 @@ mod tests {
                 capture_devices: Vec::new(),
                 render_devices: Vec::new(),
                 apps: Vec::new(),
+                solo_bus: String::new(),
                 edited: HashMap::new(),
                 meter_display: HashMap::new(),
                 holding: false,
@@ -2022,6 +2041,31 @@ mod tests {
         h.snapshot.strips[0].port.as_mut().unwrap().device_name.clear();
         h.frame(vec![]);
         assert!(h.texts.iter().any(|t| t == "(not connected)"), "{:?}", h.texts);
+    }
+
+    /// While another bus is soloed, the solo bus says it plays the soloed
+    /// buses; soloed alone, it plays its own mix, and says nothing.
+    #[test]
+    fn the_solo_bus_says_when_it_plays_soloed_buses() {
+        let mut h = Harness::new();
+        let bus = |id: &str, solo: bool| BusView {
+            id: id.into(),
+            key: format!("k{id}"),
+            label: id.into(),
+            params: engine::BusParams { solo, ..Default::default() },
+            meter: Default::default(),
+            port: None,
+        };
+        h.snapshot.solo_bus = "B1".into();
+        h.snapshot.buses = vec![bus("B1", false), bus("B2", false)];
+        h.frame(vec![]);
+        assert!(!h.texts.iter().any(|t| t == "Playing soloed buses"));
+        h.snapshot.buses = vec![bus("B1", true), bus("B2", false)];
+        h.frame(vec![]);
+        assert!(!h.texts.iter().any(|t| t == "Playing soloed buses"), "itself alone");
+        h.snapshot.buses = vec![bus("B1", false), bus("B2", true)];
+        h.frame(vec![]);
+        assert!(h.texts.iter().any(|t| t == "Playing soloed buses"), "{:?}", h.texts);
     }
 
     #[test]

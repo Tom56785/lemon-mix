@@ -34,6 +34,8 @@ pub struct HostSettings {
     pub hardware_outputs: usize,
     /// The active profile.
     pub profile: String,
+    /// The bus that plays the soloed buses, by ID, key or name.
+    pub solo_bus: String,
 }
 
 pub struct MixerHost {
@@ -221,6 +223,15 @@ impl MixerHost {
             };
             port.configure(choice);
         }
+    }
+
+    /// The bus that plays the soloed buses, by ID; empty when the setting
+    /// names no bus there is.
+    pub fn solo_bus(&self) -> String {
+        let mixer = lock(&self.mixer);
+        solo_bus_index(&self.settings.solo_bus, &mixer.buses, &mixer.saved)
+            .and_then(|index| mixer.buses.get(index).cloned())
+            .unwrap_or_default()
     }
 
     /// The active profile and every profile there is.
@@ -647,6 +658,7 @@ impl MixerHost {
             };
             topology.buses.push(BusSpec { sink, params: saved.params.clone() });
         }
+        topology.solo_bus = solo_bus_index(&self.settings.solo_bus, &bus_ids, &mixer.saved);
         drop((inputs, outputs));
         mixer.strips = strip_ids;
         mixer.buses = bus_ids;
@@ -1011,10 +1023,10 @@ impl MixerHost {
                 (id, true) => self.update_strip(&id, |p| p.mute = switch(p.mute, on)),
                 (id, false) => self.update_bus(&id, |p| p.mute = switch(p.mute, on)),
             },
-            ControlAction::Solo { target, on } => {
-                let (id, _) = self.resolve(target, Want::Strip)?;
-                self.update_strip(&id, |p| p.solo = switch(p.solo, on))
-            }
+            ControlAction::Solo { target, on } => match self.resolve(target, Want::Either)? {
+                (id, true) => self.update_strip(&id, |p| p.solo = switch(p.solo, on)),
+                (id, false) => self.update_bus(&id, |p| p.solo = switch(p.solo, on)),
+            },
             ControlAction::Mono { target, on } => match self.resolve(target, Want::Either)? {
                 (id, true) => self.update_strip(&id, |p| p.mono = switch(p.mono, on)),
                 (id, false) => self.update_bus(&id, |p| p.mono = switch(p.mono, on)),
@@ -1189,6 +1201,21 @@ pub const BUS_SOURCE: &str = "bus:";
 /// The key of the bus a strip's device names, if it names one.
 pub fn bus_source_key(device: &str) -> Option<&str> {
     device.strip_prefix(BUS_SOURCE)
+}
+
+/// The bus that plays the soloed buses, named in the settings by ID, key or
+/// name, as its index among `bus_ids`; `None` when there is no such bus.
+fn solo_bus_index(wanted: &str, bus_ids: &[String], saved: &SavedMixer) -> Option<usize> {
+    let wanted = wanted.trim();
+    if wanted.is_empty() {
+        return None;
+    }
+    let matches = |id: &String| {
+        let bus = saved.buses.iter().find(|b| &b.id == id);
+        id.eq_ignore_ascii_case(wanted)
+            || bus.is_some_and(|b| b.key == wanted || (!b.label.is_empty() && b.label.eq_ignore_ascii_case(wanted)))
+    };
+    bus_ids.iter().position(|id| id.eq_ignore_ascii_case(wanted)).or_else(|| bus_ids.iter().position(matches))
 }
 
 /// A strip's identity for the engine, from its key: the same strip in each
@@ -1493,6 +1520,7 @@ mod tests {
             hardware_inputs: 2,
             hardware_outputs: 2,
             profile: crate::config::DEFAULT_PROFILE.into(),
+            solo_bus: "A1".into(),
         }
     }
 
@@ -1621,7 +1649,7 @@ mod tests {
         control(ControlAction::AdjustGain { target: "A1".into(), db: 99.0 }).unwrap();
         control(ControlAction::Route { strip: "Mic".into(), bus: "A2".into(), on: None }).unwrap();
         control(ControlAction::Route { strip: "Mic".into(), bus: "A1".into(), on: None }).unwrap();
-        assert!(control(ControlAction::Solo { target: "A1".into(), on: None }).is_err(), "buses have no solo");
+        control(ControlAction::Solo { target: "A2".into(), on: None }).unwrap();
         assert!(control(ControlAction::Gain { target: "Mic".into(), db: f32::NAN }).is_err());
         let (strips, buses) = host.views();
         let mic = &strips[1].params;
@@ -1629,6 +1657,7 @@ mod tests {
         assert_eq!(mic.gain_db, -6.5);
         assert_eq!(strips[1].routes, ["A2"], "A1 toggled off, A2 on");
         assert!(buses[0].params.mute);
+        assert!(buses[1].params.solo, "buses solo too");
         assert_eq!(buses[0].params.gain_db, engine::params::MAX_GAIN_DB, "kept in range");
         host.control(&ControlAction::Mute { target: "Mic".into(), on: None }).unwrap();
         assert!(!host.views().0[1].params.mute, "toggled back");
@@ -1796,6 +1825,32 @@ id = \"H1\""
         // Another device later.
         assert!(!settle.settled(4, at(9000), wait));
         assert!(settle.settled(4, at(9600), wait));
+    }
+
+    /// The solo bus setting names a bus by ID (in any case), key or name.
+    #[test]
+    fn the_solo_bus_is_found_by_id_key_or_name() {
+        let saved = SavedMixer {
+            strips: Vec::new(),
+            buses: ["A1", "A2", "B3"]
+                .iter()
+                .map(|id| SavedBus {
+                    id: id.to_string(),
+                    key: format!("key{}", id.to_lowercase()),
+                    label: if *id == "A1" { "Local".into() } else { String::new() },
+                    params: Default::default(),
+                    device: String::new(),
+                    exclusive: false,
+                })
+                .collect(),
+        };
+        let ids: Vec<String> = saved.buses.iter().map(|b| b.id.clone()).collect();
+        assert_eq!(solo_bus_index("A1", &ids, &saved), Some(0));
+        assert_eq!(solo_bus_index("b3", &ids, &saved), Some(2));
+        assert_eq!(solo_bus_index("keya2", &ids, &saved), Some(1));
+        assert_eq!(solo_bus_index(" local ", &ids, &saved), Some(0));
+        assert_eq!(solo_bus_index("A9", &ids, &saved), None);
+        assert_eq!(solo_bus_index("", &ids, &saved), None);
     }
 
     #[test]

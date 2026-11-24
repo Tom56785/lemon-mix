@@ -67,7 +67,7 @@ pub enum ControlAction {
         #[serde(default)]
         on: Option<bool>,
     },
-    /// Solo a strip.
+    /// Solo a strip, or a bus (the solo bus plays soloed buses).
     Solo {
         target: String,
         #[serde(default)]
@@ -324,6 +324,9 @@ pub struct Snapshot {
     pub profiles: Vec<String>,
     /// The latency between cable playback and the mixer, in ms.
     pub latency_ms: i64,
+    /// The bus that plays the soloed buses, by ID; empty when there is none.
+    #[serde(default)]
+    pub solo_bus: String,
 }
 
 /// The answer to a request.

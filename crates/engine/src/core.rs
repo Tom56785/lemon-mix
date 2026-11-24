@@ -86,6 +86,10 @@ pub struct BusSpec {
 pub struct Topology {
     pub strips: Vec<StripSpec>,
     pub buses: Vec<BusSpec>,
+    /// The bus, by index, that plays the soloed buses while any is soloed,
+    /// instead of its own mix: a pair of headphones, say. With none, solo on
+    /// a bus does nothing.
+    pub solo_bus: Option<usize>,
 }
 
 /// What control sends the engine.
@@ -111,6 +115,7 @@ pub struct Layout {
     /// Each strip's side-chain level from the last frame, gathered before
     /// a frame so strips can read each other's. Sized with the layout.
     levels: Vec<f32>,
+    solo_bus: Option<usize>,
 }
 
 struct StripState {
@@ -151,6 +156,14 @@ struct BusState {
     mix: Frame,
     /// The last frame this bus put out, for strips fed from it.
     out: Frame,
+    /// The limiter's gain reduction this frame, for the meter.
+    reduction: f32,
+    /// How much of this bus the solo bus plays now, ramped to 1 while it is
+    /// soloed and 0 otherwise.
+    solo_send: f32,
+    /// For the solo bus: how much of its own mix it plays now, ramped to 0
+    /// while other buses are soloed.
+    own: f32,
 }
 
 /// The most frames processed in one batch. After a longer stall the engine
@@ -225,6 +238,7 @@ impl Engine {
                     buses: Vec::new(),
                     meters: Arc::clone(&meters),
                     levels: Vec::new(),
+                    solo_bus: None,
                 }),
                 commands: receiver,
                 garbage: garbage_tx,
@@ -271,6 +285,9 @@ impl Engine {
                     rms: RmsFollower::default(),
                     mix: [0.0; FRAME_LEN],
                     out: [0.0; FRAME_LEN],
+                    reduction: 1.0,
+                    solo_send: 0.0,
+                    own: 1.0,
                 }
             })
             .collect();
@@ -319,7 +336,9 @@ impl Engine {
             })
             .collect();
         *lock(&self.meters) = Arc::clone(&meters);
-        let layout = Layout { strips: strip_states, buses: bus_states, meters, levels: vec![0.0; strip_count] };
+        let solo_bus = topology.solo_bus.filter(|&index| index < buses);
+        let layout =
+            Layout { strips: strip_states, buses: bus_states, meters, levels: vec![0.0; strip_count], solo_bus };
         self.send(Command::Layout(Box::new(layout)));
     }
 
@@ -558,7 +577,7 @@ impl Core {
 
     fn process_frame(&mut self, frame_number: u64) {
         let Core { layout, frame, packet, .. } = self;
-        let Layout { strips, buses, meters, levels } = &mut **layout;
+        let Layout { strips, buses, meters, levels, solo_bus } = &mut **layout;
         for bus in buses.iter_mut() {
             bus.mix = [0.0; FRAME_LEN];
         }
@@ -652,7 +671,7 @@ impl Core {
             }
         }
 
-        for (index, bus) in buses.iter_mut().enumerate() {
+        for bus in buses.iter_mut() {
             let target = bus.params.gain();
             let mix = &mut bus.mix;
             if bus.gain != target || target != 1.0 {
@@ -660,30 +679,69 @@ impl Core {
             }
             bus.gain = target;
             if bus.params.mono {
-                for pair in mix.as_chunks_mut::<2>().0 {
-                    let mid = (pair[0] + pair[1]) * 0.5;
-                    pair[0] = mid;
-                    pair[1] = mid;
-                }
+                mono(mix);
             }
-            let reduction = if bus.limiter.active() { bus.limiter.process(mix) } else { 1.0 };
+            bus.reduction = if bus.limiter.active() { bus.limiter.process(mix) } else { 1.0 };
             for sample in mix.iter_mut() {
                 *sample = sample.clamp(-1.0, 1.0);
             }
             bus.out = *mix;
-            let (peak, rms) = bus.rms.measure(mix);
+        }
+
+        // While any bus is soloed, the solo bus plays the soloed buses at its
+        // own fader instead of its own mix (unless it is soloed too), each
+        // faded in and out across a frame. Strips fed from it still hear its
+        // own mix: what it plays never feeds back into the buses.
+        let solo = solo_bus.filter(|_| buses.iter().any(|b| b.params.solo));
+        if let Some(monitor) = *solo_bus {
+            *frame = [0.0; FRAME_LEN];
+            for (index, bus) in buses.iter_mut().enumerate() {
+                let target = if solo.is_some() && bus.params.solo && index != monitor { 1.0 } else { 0.0 };
+                mix_into(frame, &bus.out, [bus.solo_send; 2], [target; 2]);
+                bus.solo_send = target;
+            }
+            let bus = &mut buses[monitor];
+            let gain = bus.gain;
+            for sample in frame.iter_mut() {
+                *sample *= gain;
+            }
+            if bus.params.mono {
+                mono(frame);
+            }
+            let own = if solo.is_none() || bus.params.solo { 1.0 } else { 0.0 };
+            mix_into(frame, &bus.out, [bus.own; 2], [own; 2]);
+            bus.own = own;
+            for sample in frame.iter_mut() {
+                *sample = sample.clamp(-1.0, 1.0);
+            }
+        }
+
+        // Each bus's device plays what it puts out; the solo bus's, what it
+        // plays. The meters show what is played.
+        for (index, bus) in buses.iter_mut().enumerate() {
+            let played = if *solo_bus == Some(index) { &*frame } else { &bus.out };
+            let (peak, rms) = bus.rms.measure(played);
             if let Some(meter) = meters.buses.get(index) {
-                meter.record(peak, rms, reduction);
+                meter.record(peak, rms, bus.reduction);
             }
             match &bus.sink {
                 BusSink::Virtual(ring) => {
-                    encode_frame(mix, packet);
+                    encode_frame(played, packet);
                     ring.write(frame_number, packet);
                 }
-                BusSink::Hardware(Some(port)) => port.push(mix),
+                BusSink::Hardware(Some(port)) => port.push(played),
                 BusSink::Hardware(None) => {}
             }
         }
+    }
+}
+
+/// Sums left and right into both.
+fn mono(frame: &mut Frame) {
+    for pair in frame.as_chunks_mut::<2>().0 {
+        let mid = (pair[0] + pair[1]) * 0.5;
+        pair[0] = mid;
+        pair[1] = mid;
     }
 }
 

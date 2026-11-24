@@ -27,6 +27,10 @@ pub struct Cli {
     #[arg(long, value_name = "MS")]
     pub buffer_ms: Option<i64>,
 
+    /// The bus that plays the soloed buses instead of its own mix, by ID or name [config.toml: solo_bus, default A1]
+    #[arg(long, value_name = "BUS")]
+    pub solo_bus: Option<String>,
+
     /// Log USB/IP stream traces and pipe-reset events for troubleshooting [config.toml: diagnostics, default false]
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true", value_parser = parse_bool_arg)]
     pub diagnostics: Option<bool>,

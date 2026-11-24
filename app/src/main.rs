@@ -362,6 +362,7 @@ fn host_settings(cli: &Cli, config: &Config, logger: &Logger) -> HostSettings {
         hardware_inputs,
         hardware_outputs,
         profile,
+        solo_bus: cli.solo_bus.clone().unwrap_or_else(|| config_string(config, "solo_bus", config::DEFAULT_SOLO_BUS)),
     }
 }
 
@@ -443,6 +444,7 @@ fn run_self_test(descriptors: &[Descriptors], logger: &Logger) -> Result<(), Str
         hardware_inputs: 1,
         hardware_outputs: 1,
         profile: config::DEFAULT_PROFILE.into(),
+        solo_bus: config::DEFAULT_SOLO_BUS.into(),
     };
     let host = MixerHost::new(settings, config::SavedMixer::default(), logger, "", false);
     let cable = Cable::numbered(1);
@@ -586,6 +588,35 @@ mod tests {
         let no_cables = parse_config("listen = \"x\"\n").unwrap();
         assert_eq!(ids(startup_cables(None, &no_cables, &logger)), [0u32; 0], "no default cable");
         assert_eq!(ids(startup_cables(Some(40), &named, &logger)), [3, 1], "invalid --cables is ignored");
+    }
+
+    /// The solo bus comes from config.toml, or the command line over it, and
+    /// is A1 otherwise.
+    #[test]
+    fn the_solo_bus_is_a_setting() {
+        let settings =
+            |cli: Cli, content: &str| host_settings(&cli, &parse_config(content).unwrap(), &Logger::discard());
+        assert_eq!(settings(Cli::default(), "").solo_bus, "A1");
+        assert_eq!(
+            settings(
+                Cli::default(),
+                "solo_bus = \"Local\"
+"
+            )
+            .solo_bus,
+            "Local"
+        );
+        let cli = Cli { solo_bus: Some("B3".into()), ..Cli::default() };
+        assert_eq!(
+            settings(
+                cli,
+                "solo_bus = \"Local\"
+"
+            )
+            .solo_bus,
+            "B3"
+        );
+        assert!(config::default_config_content().contains("solo_bus = \"A1\""));
     }
 
     #[test]

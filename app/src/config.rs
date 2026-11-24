@@ -28,6 +28,8 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:3241";
 pub const DEFAULT_LATENCY_MS: i64 = 20;
 /// Audio kept between each physical device and the mixer.
 pub const DEFAULT_BUFFER_MS: i64 = 20;
+/// The bus that plays soloed buses instead of its own mix.
+pub const DEFAULT_SOLO_BUS: &str = "A1";
 pub const MIN_BUFFER_MS: i64 = 5;
 pub const MAX_BUFFER_MS: i64 = 200;
 /// Hardware strips and buses to start with, as in the classic five-in, five-out
@@ -302,6 +304,9 @@ pub fn default_config_content() -> String {
         "# For troubleshooting: hold all audio transfers this many milliseconds once a".to_string(),
         "# minute, to reproduce a system stall. 0 turns it off.".to_string(),
         "stall_test_ms = 0".to_string(),
+        "# The bus that plays the soloed buses instead of its own mix while any bus".to_string(),
+        "# is soloed, by ID or name: headphones, say.".to_string(),
+        format!("solo_bus = \"{DEFAULT_SOLO_BUS}\""),
     ]
     .iter()
     .map(|line| format!("{line}\n"))
@@ -605,6 +610,7 @@ pub fn config_mixer(config: &Config) -> SavedMixer {
             let params = engine::BusParams {
                 gain_db: float(table, "gain_db", 0.0),
                 mute: boolean(table, "mute"),
+                solo: boolean(table, "solo"),
                 mono: boolean(table, "mono"),
                 limiter,
             }
@@ -723,6 +729,9 @@ pub fn set_mixer_entries(content: &str, mixer: &SavedMixer) -> Result<String, St
             }
             t.insert("gain_db", value(rounded(b.params.gain_db)));
             t.insert("mute", value(b.params.mute));
+            if b.params.solo {
+                t.insert("solo", value(true));
+            }
             t.insert("mono", value(b.params.mono));
             if let Some(ceiling) = b.params.limiter {
                 t.insert("limiter", value(rounded(ceiling)));
@@ -1090,6 +1099,28 @@ duck_fade_up_ms = 1e9
 
     /// The gate's and compressor's options round-trip, and are written only
     /// once changed.
+    /// A bus's solo is saved with it, and written only when it is on.
+    #[test]
+    fn bus_solo_is_read_and_written() {
+        let mut bus = SavedBus {
+            id: "B3".into(),
+            key: String::new(),
+            label: String::new(),
+            params: Default::default(),
+            device: String::new(),
+            exclusive: false,
+        };
+        let round_trip = |bus: &SavedBus| {
+            let text = set_mixer_entries("", &SavedMixer { strips: Vec::new(), buses: vec![bus.clone()] }).unwrap();
+            (text.clone(), config_mixer(&parse_config(&text).unwrap()).buses.remove(0).params.solo)
+        };
+        assert!(!round_trip(&bus).1);
+        assert!(!round_trip(&bus).0.contains("solo"));
+        bus.params.solo = true;
+        let (text, solo) = round_trip(&bus);
+        assert!(solo && text.contains("solo = true"), "{text}");
+    }
+
     #[test]
     fn processing_options_are_read_and_written_with_their_strip() {
         let mut strip = SavedStrip {

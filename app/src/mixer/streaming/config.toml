@@ -15,6 +15,9 @@ diagnostics = false
 # For troubleshooting: hold all audio transfers this many milliseconds once a
 # minute, to reproduce a system stall. 0 turns it off.
 stall_test_ms = 0
+# The bus that plays the soloed buses instead of its own mix while any bus
+# is soloed, by ID or name: headphones, say.
+solo_bus = "A1"
 profile = "Streaming"
 
 [[cable]]

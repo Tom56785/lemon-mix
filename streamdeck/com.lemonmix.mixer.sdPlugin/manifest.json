@@ -49,7 +49,7 @@
 			"Name": "Solo",
 			"UUID": "com.lemonmix.mixer.solo",
 			"Icon": "imgs/actions/solo",
-			"Tooltip": "Solos a strip: while any strip is soloed, only soloed strips are heard",
+			"Tooltip": "Solos a strip (only soloed strips are heard), or a bus (the solo bus plays soloed buses)",
 			"PropertyInspectorPath": "ui/strip.html",
 			"Controllers": [
 				"Keypad"

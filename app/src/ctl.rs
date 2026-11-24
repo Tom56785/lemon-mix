@@ -13,7 +13,7 @@ Controls a running Lemon Mix.
 Commands:
   status                              List the strips and buses
   mute   <target> [on|off|toggle]     Mute a strip or bus
-  solo   <target> [on|off|toggle]     Solo a strip
+  solo   <target> [on|off|toggle]     Solo a strip, or play a bus on the solo bus
   mono   <target> [on|off|toggle]     Sum a strip's or bus's left and right
   route  <strip> <bus> [on|off|toggle]
                                       Send a strip to a bus
@@ -179,9 +179,12 @@ pub fn format_status(snapshot: &Snapshot) -> String {
     if !snapshot.profile.is_empty() {
         text.push_str(&format!("Profile: {}\n", snapshot.profile));
     }
+    if !snapshot.solo_bus.is_empty() {
+        text.push_str(&format!("Solo bus: {} (plays the soloed buses)\n", snapshot.solo_bus));
+    }
     text.push_str("INPUTS\n");
     text.push_str(&format!(
-        "  {:<5} {:<name_width$} {:>9}  {:<19} {:<16} KEY\n",
+        "  {:<5} {:<name_width$} {:>9}  {:<22} {:<16} KEY\n",
         "ID", "NAME", "GAIN", "SWITCHES", "SENDS TO"
     ));
     for StripView { id, key, label, params, routes, duck_by, .. } in &snapshot.strips {
@@ -193,18 +196,23 @@ pub fn format_status(snapshot: &Snapshot) -> String {
         ]);
         let sends = if routes.is_empty() { "-".to_string() } else { routes.join(",") };
         text.push_str(&format!(
-            "  {id:<5} {:<name_width$} {:>9}  {switches:<19} {sends:<16} {key}\n",
+            "  {id:<5} {:<name_width$} {:>9}  {switches:<22} {sends:<16} {key}\n",
             ellipsize(label, name_width),
             gain(params.gain_db)
         ));
     }
     text.push_str("OUTPUTS\n");
     text.push_str(&format!(
-        "  {:<5} {:<name_width$} {:>9}  {:<19} {:<16} KEY\n",
+        "  {:<5} {:<name_width$} {:>9}  {:<22} {:<16} KEY\n",
         "ID", "NAME", "GAIN", "SWITCHES", "DEVICE"
     ));
     for BusView { id, key, label, params, port, .. } in &snapshot.buses {
-        let switches = flags(&[(params.mute, "mute"), (params.mono, "mono"), (params.limiter.is_some(), "limiter")]);
+        let switches = flags(&[
+            (params.mute, "mute"),
+            (params.solo, "solo"),
+            (params.mono, "mono"),
+            (params.limiter.is_some(), "limiter"),
+        ]);
         let device = match port {
             Some(port) if !port.device_name.is_empty() => port.device_name.clone(),
             Some(port) if port.endpoint.is_empty() => "none".to_string(),
@@ -212,7 +220,7 @@ pub fn format_status(snapshot: &Snapshot) -> String {
             None => "virtual".to_string(),
         };
         text.push_str(&format!(
-            "  {id:<5} {:<name_width$} {:>9}  {switches:<19} {:<16} {key}\n",
+            "  {id:<5} {:<name_width$} {:>9}  {switches:<22} {:<16} {key}\n",
             ellipsize(label, name_width),
             gain(params.gain_db),
             ellipsize(&device, 16)
@@ -296,8 +304,10 @@ mod tests {
             }],
             ..Default::default()
         };
+        let snapshot = Snapshot { solo_bus: "A1".into(), ..snapshot };
         let text = format_status(&snapshot);
-        assert!(text.contains("H1    Mic    -6.0 dB  mute                A1,B2            a1b2c3d4e5f6"), "{text}");
-        assert!(text.contains("A1    A1     -inf dB  -                   Speakers         0f0f0f0f0f0f"), "{text}");
+        assert!(text.contains("H1    Mic    -6.0 dB  mute                   A1,B2            a1b2c3d4e5f6"), "{text}");
+        assert!(text.contains("A1    A1     -inf dB  -                      Speakers         0f0f0f0f0f0f"), "{text}");
+        assert!(text.contains("Solo bus: A1 (plays the soloed buses)"), "{text}");
     }
 }

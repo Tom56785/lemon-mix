@@ -44,5 +44,5 @@ export class MuteAction extends SwitchAction {
 @action({ UUID: "com.lemonmix.mixer.solo" })
 export class SoloAction extends SwitchAction {
 	protected readonly name = "solo";
-	protected readonly want = "strip";
+	protected readonly want = "either";
 }

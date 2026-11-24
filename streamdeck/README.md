@@ -5,7 +5,7 @@ A Stream Deck plugin for Lemon Mix. Its keys and dials control strips and buses,
 | Action | Device | What it does |
 |---|---|---|
 | **Mute** | Key | Mutes a strip or bus. The key turns red while it is muted. |
-| **Solo** | Key | Solos a strip. The key lights while it is soloed. |
+| **Solo** | Key | Solos a strip, or a bus to hear it on the solo bus (see `solo_bus` in Lemon Mix's config.toml). The key lights while it is soloed. |
 | **Route** | Key | Sends a strip to a bus, or stops it. The key lights while it sends. |
 | **Volume** | Key | Moves a fader by a step (for example +3 or -3 dB), or sets it to a level. The title shows the level. |
 | **Fader** | Dial (Stream Deck +) | Turn for volume, or hold the dial while turning for finer steps. Press or tap the screen to mute. The screen shows the level, the fader and a level meter. |
